@@ -1,0 +1,38 @@
+# Local credentials, configuration, and runtime data
+.env
+.env.*
+*.env
+!.env.example
+!*.env.example
+config.json
+config.previous.json
+*.session*
+*.sqlite*
+*.db
+*.db-*
+*.pem
+*.key
+local-data/
+
+# Dependencies, build output, and local tooling
+node_modules/
+.venv
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.codegraph/
+.pi/
+.DS_Store
+*.log
+*.tsbuildinfo
+coverage/
+test-results/
+playwright-report/
+
+# Private operational notes and historical deployment artifacts stay local
+/AGENTS.md
+/docs/*
+!/docs/development.md
+!/docs/management-api.md
+!/docs/migration.md
+/web/.cta.json

@@ -1,0 +1,43 @@
+{
+  "channels": [
+    {
+      "id": -1001234567890,
+      "series": [
+        "吞噬星空"
+      ]
+    },
+    {
+      "id": -1009876543210,
+      "series": [
+        "吞噬星空"
+      ]
+    }
+  ],
+  "series": [
+    {
+      "name": "吞噬星空",
+      "aliases": [
+        "吞噬星空",
+        "吞噬星空动画"
+      ],
+      "exclude_keywords": [
+        "预告",
+        "花絮",
+        "解说",
+        "剪辑",
+        "PV",
+        "Trailer"
+      ],
+      "episode_patterns": [
+        "S(?P<season>\\d{1,2})E(?P<episode>\\d{1,4})",
+        "第\\s*(?P<episode>\\d{1,4})\\s*[集话]"
+      ],
+      "default_season": 1
+    }
+  ],
+  "download_concurrency": 2,
+  "scan_interval_seconds": 1800,
+  "initial_history_days": 7,
+  "edit_lookback_hours": 24,
+  "emby_base_url": "http://emby:8096/emby"
+}

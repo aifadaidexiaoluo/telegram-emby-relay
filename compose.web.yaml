@@ -1,0 +1,42 @@
+name: relay
+services:
+  web:
+    build:
+      context: .
+    init: true
+    restart: unless-stopped
+    environment:
+      TG_API_ID: ${TG_API_ID:-0}
+      TG_API_HASH: ${TG_API_HASH:-}
+      EMBY_API_KEY: ${EMBY_API_KEY:-}
+      EMBY_BASE_URL: ${EMBY_BASE_URL:-http://emby:8096/emby}
+      TG_SESSION_PATH: /state/telegram.session
+      DATABASE_PATH: /state/downloads.sqlite3
+      CONFIG_PATH: /configuration/config.json
+      MEDIA_ROOT: /media/TV
+      TEMP_ROOT: /tmp/telegram
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
+      PORT: "3000"
+      HOST: 0.0.0.0
+      SERVER_SHUTDOWN_TIMEOUT: "55"
+    ports:
+      - "127.0.0.1:${WEB_PORT:-3000}:3000"
+    volumes:
+      - state:/state
+      - configuration:/configuration
+      - ${MEDIA_PATH:-./local-data/media}:/media
+      - ${TEMP_PATH:-./local-data/temp}:/tmp/telegram
+    networks: [default, emby]
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+volumes:
+  state:
+    name: ${TELEGRAM_STATE_VOLUME:-relay_state}
+  configuration:
+    name: ${CONFIG_VOLUME:-relay_configuration}
+networks:
+  emby:
+    external: true
+    name: ${EMBY_NETWORK:-emby_media_internal}
