@@ -1,6 +1,8 @@
-import { match } from "./config.ts"
+import { match, matchingRules } from "./config.ts"
 import type { Config } from "../lib/types.ts"
 import type { MediaMessage } from "./config.ts"
+
+export class AIResultError extends Error {}
 
 // The agent only classifies supplied media against configured works; it has no tools.
 export async function identifyMedia(
@@ -27,7 +29,7 @@ export async function identifyMedia(
     )
   )
     return candidate
-  const works = config.series.filter((rule) => names.includes(rule.name))
+  const { rules: works } = matchingRules(config, names, message, album)
   if (!works.length) return candidate
   const response = await request(
     config.ai.base_url.replace(/\/+$/, "") + "/chat/completions",
@@ -77,20 +79,21 @@ export async function identifyMedia(
     throw new Error("AI 接口响应不是有效 JSON")
   })
   const content = body?.choices?.[0]?.message?.content
-  if (typeof content !== "string") throw new Error("AI 识别响应缺少 JSON 内容")
+  if (typeof content !== "string")
+    throw new AIResultError("AI 识别响应缺少 JSON 内容")
   let result: unknown
   try {
     result = JSON.parse(content)
   } catch {
-    throw new Error("AI 识别响应不是有效 JSON")
+    throw new AIResultError("AI 识别响应不是有效 JSON")
   }
   if (!result || typeof result !== "object" || Array.isArray(result))
-    throw new Error("AI 识别结果格式无效")
+    throw new AIResultError("AI 识别结果格式无效")
   const value = result as Record<string, unknown>
   if (value.series_name === null) return candidate
   if (
     typeof value.series_name !== "string" ||
-    !names.includes(value.series_name) ||
+    !works.some((rule) => rule.name === value.series_name) ||
     !Number.isInteger(value.season) ||
     Number(value.season) < 0 ||
     Number(value.season) > 99 ||
@@ -99,7 +102,7 @@ export async function identifyMedia(
         Number(value.episode) < 1 ||
         Number(value.episode) > 9999))
   )
-    throw new Error("AI 识别结果超出允许的作品或季集范围")
+    throw new AIResultError("AI 识别结果超出允许的作品或季集范围")
   return match(config, channel, names, message, album, {
     series_name: value.series_name,
     season: Number(value.season),

@@ -31,6 +31,7 @@ playwright-report/
 
 # Private operational notes and historical deployment artifacts stay local
 /AGENTS.md
+/container-readme.md
 /docs/*
 !/docs/development.md
 !/docs/management-api.md

@@ -268,6 +268,10 @@ test("legacy database keeps 64-bit document IDs, history and checkpoints through
   assert.equal(db.tasks()[0].document_id, "9223372036854700001")
   assert.equal(db.tasks()[0].final_path, "/old/file.mp4")
   assert.equal(db.getCheckpoint(PRIMARY)!.last_scanned_message_id, 40)
+  assert.equal(
+    db.sql.prepare("SELECT matched FROM downloads").get()!.matched,
+    1
+  )
 })
 
 test("Telethon SQLite session converts auth key into private StringSession without modifying the original", async (t) => {
@@ -502,6 +506,130 @@ test("scan ingests full album context at a cursor boundary and ignores stale sca
   const result = await source.scan(PRIMARY)
   assert.equal(result.completed, false)
   assert.equal(db.getCheckpoint(PRIMARY)!.first_scan_complete, 0)
+})
+
+test("time-bounded album scans retain caption context without enqueuing outside videos", async (t) => {
+  const { settings } = setup(t)
+  const db = new Database(settings.database)
+  t.after(() => db.close())
+  db.configure(rules, new Map([[PRIMARY, ["吞噬星空"]]]), false)
+  const client = new FakeTransport(settings.session)
+  client.data.set(PRIMARY, [
+    { id: 1, text: "吞噬星空 第158集", date: 100, groupedId: "album" },
+    { ...mediaMessage(2, "", 100), groupedId: "album" },
+    { ...mediaMessage(3, "", 101), groupedId: "album" },
+  ])
+  const source = new Source(
+    client,
+    new Map([[PRIMARY, { id: PRIMARY }]]),
+    rules,
+    db
+  )
+  await source.traverse(PRIMARY, 0, 101, 102)
+  assert.deepEqual(
+    db.tasks().map((item) => [item.message_id, item.episode]),
+    [[3, 158]]
+  )
+})
+
+test("keyword context stays within each album", async (t) => {
+  const { settings } = setup(t)
+  const db = new Database(settings.database)
+  t.after(() => db.close())
+  db.configure(rules, new Map([[PRIMARY, ["吞噬星空"]]]), false)
+  const client = new FakeTransport(settings.session)
+  const source = new Source(
+    client,
+    new Map([[PRIMARY, { id: PRIMARY }]]),
+    rules,
+    db
+  )
+  await source.ingest(PRIMARY, [
+    { id: 1, text: "吞噬星空 第158集", date: 1, groupedId: "a" },
+    { ...mediaMessage(2, "", 1), groupedId: "a" },
+    { ...mediaMessage(3, "", 1), groupedId: "b" },
+    mediaMessage(4, "", 1),
+  ])
+  assert.deepEqual(
+    db.tasks().map((item) => item.message_id),
+    [2]
+  )
+})
+
+test("rescanning cancels rejected candidates and corrects old identities before latest selection", async (t) => {
+  const { settings } = setup(t)
+  const db = new Database(settings.database)
+  t.after(() => db.close())
+  const config: Config = {
+    ...rules,
+    series: [...rules.series, { name: "完美世界", latest_episodes: 1 }],
+  }
+  db.configure(config, new Map([[PRIMARY, ["吞噬星空", "完美世界"]]]), false)
+  db.checkpoint(PRIMARY, 0)
+  db.enqueue([
+    task(PRIMARY, 1, 999),
+    { ...task(PRIMARY, 2, 998), document_id: "100" },
+  ])
+  db.update(task(PRIMARY, 2), {
+    status: "failed",
+    attempts: 8,
+    last_error: "old error",
+  })
+  const client = new FakeTransport(settings.session)
+  const source = new Source(
+    client,
+    new Map([[PRIMARY, { id: PRIMARY }]]),
+    config,
+    db
+  )
+  await source.ingest(PRIMARY, [
+    mediaMessage(1, "吞噬星空 预告 第999集", 1),
+    mediaMessage(2, "完美世界 第10集", 1),
+    mediaMessage(3, "吞噬星空 第158集", 1),
+  ])
+  db.finishScan(PRIMARY)
+  const rejected = db.tasks().find((item) => item.message_id === 1)!
+  assert.equal(rejected.status, "cancelled")
+  assert.equal(rejected.last_error, "不符合当前关键词或排除规则")
+  const corrected = db.tasks().find((item) => item.message_id === 2)!
+  assert.equal(corrected.series_name, "完美世界")
+  assert.equal(corrected.document_id, task(PRIMARY, 2).document_id)
+  assert.equal(corrected.episode, 10)
+  assert.equal(corrected.attempts, 0)
+  assert.equal(corrected.last_error, null)
+  assert.deepEqual(
+    [db.claim([PRIMARY])!.message_id, db.claim([PRIMARY])!.message_id].sort(),
+    [2, 3]
+  )
+  assert.equal(db.claim([PRIMARY]), undefined)
+  await source.ingest(PRIMARY, [mediaMessage(1, "吞噬星空 第159集", 1)])
+  assert.equal(db.claim([PRIMARY])!.message_id, 1)
+})
+
+test("rescanning preserves completed and active downloads", async (t) => {
+  const { settings } = setup(t)
+  const db = new Database(settings.database)
+  t.after(() => db.close())
+  db.configure(rules, new Map([[PRIMARY, ["吞噬星空"]]]), false)
+  db.enqueue([task(), task(PRIMARY, 2)])
+  db.completed(task(), "/retained.mp4")
+  db.update(task(PRIMARY, 2), { status: "downloading" })
+  const client = new FakeTransport(settings.session)
+  const source = new Source(
+    client,
+    new Map([[PRIMARY, { id: PRIMARY }]]),
+    rules,
+    db
+  )
+  await source.ingest(PRIMARY, [
+    mediaMessage(1, "吞噬星空 预告", 1),
+    mediaMessage(2, "吞噬星空 预告", 1),
+  ])
+  assert.deepEqual(
+    db.tasks().map((item) => item.status),
+    ["completed", "downloading"]
+  )
+  assert.equal(db.tasks()[0].final_path, "/retained.mp4")
 })
 
 test("runtime preserves accounts/config/key/version after restart and never returns saved key", async (t) => {
@@ -775,6 +903,141 @@ test("address-only channels select an accessible account and new works rescan ol
   assert.equal(readFileSync(completed.final_path!, "utf8"), "data")
 })
 
+test("keyword filtering skips unrelated and excluded videos without blocking scan selection", async (t) => {
+  const { settings } = setup(t)
+  const db = new Database(settings.database)
+  t.after(() => db.close())
+  const config: Config = {
+    ...rules,
+    ai: { enabled: true, base_url: "https://ai.test/v1", model: "test" },
+  }
+  db.configure(config, new Map([[PRIMARY, ["吞噬星空"]]]), false)
+  db.checkpoint(PRIMARY, 0)
+  const client = new FakeTransport(settings.session)
+  client.data.set(PRIMARY, [
+    mediaMessage(1, "unrelated video", 1),
+    mediaMessage(2, "吞噬星空 预告 第160集", 1),
+    mediaMessage(3, "吞噬星空 第159集", 1),
+  ])
+  const source = new Source(
+    client,
+    new Map([[PRIMARY, { id: PRIMARY }]]),
+    config,
+    db
+  )
+  const provider = t.mock.method(globalThis, "fetch", async () => {
+    throw new Error("provider should not run")
+  })
+  assert.equal((await source.scan(PRIMARY)).completed, true)
+  assert.equal(provider.mock.callCount(), 0)
+  assert.equal(db.getCheckpoint(PRIMARY)!.last_scanned_message_id, 3)
+  assert.equal(db.getCheckpoint(PRIMARY)!.first_scan_complete, 1)
+  assert.equal(db.tasks().length, 1)
+  assert.equal(db.tasks()[0].episode, 159)
+  assert.equal(db.tasks()[0].status, "pending")
+})
+
+test("invalid AI output cannot hold all channels or block later keyword tasks", async (parent) => {
+  for (const content of [
+    JSON.stringify({
+      series_name: "unlisted-private-title",
+      season: 1,
+      episode: 159,
+    }),
+    JSON.stringify({ series_name: "吞噬星空", season: 100, episode: 159 }),
+    JSON.stringify({ series_name: "吞噬星空", season: 1, episode: -1 }),
+    "private-invalid-json",
+  ]) {
+    await parent.test(
+      content.startsWith("{") ? "out of range" : "invalid JSON",
+      async (t) => {
+        const { settings } = setup(t)
+        const db = new Database(settings.database)
+        t.after(() => db.close())
+        const config: Config = {
+          ...rules,
+          ai: { enabled: true, base_url: "https://ai.test/v1", model: "test" },
+        }
+        db.configure(
+          config,
+          new Map([
+            [PRIMARY, ["吞噬星空"]],
+            [SECONDARY, ["吞噬星空"]],
+          ]),
+          false
+        )
+        db.checkpoint(PRIMARY, 0)
+        db.checkpoint(SECONDARY, 0)
+        const client = new FakeTransport(settings.session)
+        client.data.set(PRIMARY, [
+          mediaMessage(1, "吞噬星空 集数待确认", 1),
+          mediaMessage(2, "吞噬星空 第159集", 1),
+        ])
+        client.data.set(SECONDARY, [mediaMessage(3, "吞噬星空 第158集", 1)])
+        const source = new Source(
+          client,
+          new Map([
+            [PRIMARY, { id: PRIMARY }],
+            [SECONDARY, { id: SECONDARY }],
+          ]),
+          config,
+          db
+        )
+        const provider = t.mock.method(globalThis, "fetch", async () =>
+          Response.json({ choices: [{ message: { content } }] })
+        )
+        const warnings = t.mock.method(console, "warn", () => {})
+        assert.equal((await source.scan(PRIMARY)).completed, true)
+        assert.equal(db.getCheckpoint(PRIMARY)!.last_scanned_message_id, 2)
+        assert.equal(db.selectionReady(), false)
+        assert.equal((await source.scan(SECONDARY)).completed, true)
+        assert.equal(db.selectionReady(), true)
+        assert.equal(source.lastError, null)
+        assert.equal(provider.mock.callCount(), 1)
+        assert.equal(warnings.mock.callCount(), 1)
+        assert.equal(
+          JSON.stringify(warnings.mock.calls).includes("private"),
+          false
+        )
+        assert.equal(
+          db.tasks().some((candidate) => candidate.message_id === 1),
+          false
+        )
+        assert.equal(db.claim([PRIMARY, SECONDARY])!.episode, 159)
+      }
+    )
+  }
+})
+
+test("invalid AI output preserves a valid local rule result", async (t) => {
+  const { settings } = setup(t)
+  const db = new Database(settings.database)
+  t.after(() => db.close())
+  const config: Config = {
+    ...rules,
+    series: [{ name: "吞噬星空" }],
+    ai: { enabled: true, base_url: "https://ai.test/v1", model: "test" },
+  }
+  db.configure(config, new Map([[PRIMARY, ["吞噬星空"]]]), false)
+  db.checkpoint(PRIMARY, 0)
+  const client = new FakeTransport(settings.session)
+  client.data.set(PRIMARY, [mediaMessage(1, "吞噬星空", 1)])
+  const source = new Source(
+    client,
+    new Map([[PRIMARY, { id: PRIMARY }]]),
+    config,
+    db
+  )
+  t.mock.method(globalThis, "fetch", async () =>
+    Response.json({ choices: [{ message: { content: "[]" } }] })
+  )
+  t.mock.method(console, "warn", () => {})
+  assert.equal((await source.scan(PRIMARY)).completed, true)
+  assert.equal(db.tasks()[0].series_name, "吞噬星空")
+  assert.equal(db.tasks()[0].episode, null)
+  assert.equal(db.tasks()[0].status, "pending")
+})
+
 test("AI failure keeps history cursor for retry and exposes a safe scan error", async (t) => {
   const { settings } = setup(t)
   const db = new Database(settings.database)
@@ -786,7 +1049,7 @@ test("AI failure keeps history cursor for retry and exposes a safe scan error", 
   db.configure(config, new Map([[PRIMARY, ["吞噬星空"]]]), false)
   db.checkpoint(PRIMARY, 0)
   const client = new FakeTransport(settings.session)
-  client.data.set(PRIMARY, [mediaMessage(1, "unrecognized title", 1)])
+  client.data.set(PRIMARY, [mediaMessage(1, "吞噬星空 集数待确认", 1)])
   const source = new Source(
     client,
     new Map([[PRIMARY, { id: PRIMARY }]]),

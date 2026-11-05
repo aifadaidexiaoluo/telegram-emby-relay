@@ -58,6 +58,7 @@ export class Database {
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','downloading','retry_wait','failed','completed','cancelled')),
         attempts INTEGER NOT NULL DEFAULT 0, next_retry_at REAL NOT NULL DEFAULT 0, final_path TEXT, last_error TEXT,
         created_at REAL NOT NULL, updated_at REAL NOT NULL, published_at REAL NOT NULL DEFAULT 0,
+        matched INTEGER NOT NULL DEFAULT 1 CHECK(matched IN (0,1)),
         PRIMARY KEY(channel_id,message_id));
       CREATE INDEX IF NOT EXISTS downloads_ready ON downloads(status,next_retry_at,created_at);
       CREATE TABLE IF NOT EXISTS channel_checkpoints (channel_id INTEGER PRIMARY KEY, initial_since REAL NOT NULL,
@@ -72,6 +73,11 @@ export class Database {
     `)
     for (const [table, name, definition] of [
       ["downloads", "published_at", "REAL NOT NULL DEFAULT 0"],
+      [
+        "downloads",
+        "matched",
+        "INTEGER NOT NULL DEFAULT 1 CHECK(matched IN (0,1))",
+      ],
       [
         "channel_checkpoints",
         "first_scan_complete",
@@ -162,7 +168,7 @@ export class Database {
       if (ready && channels.length) {
         const rows = this.sql
           .prepare(
-            `SELECT channel_id,message_id,season,episode FROM downloads WHERE series_name=? AND episode IS NOT NULL
+            `SELECT channel_id,message_id,season,episode FROM downloads WHERE series_name=? AND episode IS NOT NULL AND matched=1
           AND channel_id IN (SELECT value FROM json_each(?)) ORDER BY season DESC,episode DESC,
           CASE status WHEN 'completed' THEN 0 WHEN 'downloading' THEN 1 WHEN 'pending' THEN 2 WHEN 'retry_wait' THEN 3 WHEN 'cancelled' THEN 4 ELSE 5 END,
           published_at DESC,channel_id,message_id DESC`
@@ -216,15 +222,33 @@ export class Database {
       this.selectLatest()
     })
   }
-  enqueue(tasks: Candidate[], channel?: number, cursor?: number) {
+  enqueue(
+    tasks: Candidate[],
+    channel?: number,
+    cursor?: number,
+    rejected: number[] = []
+  ) {
     return this.transaction(() => {
+      if (rejected.length) {
+        if (channel === undefined) throw new Error("撤销候选必须指定频道")
+        this.sql
+          .prepare(
+            `UPDATE downloads SET matched=0,status='cancelled',last_error='不符合当前关键词或排除规则',updated_at=?
+          WHERE channel_id=? AND message_id IN (SELECT value FROM json_each(?)) AND status NOT IN ('completed','downloading')`
+          )
+          .run(now(), channel, JSON.stringify(rejected))
+      }
       let count = 0
       for (const t of tasks) {
         count += Number(
           this.sql
             .prepare(
               `INSERT INTO downloads(channel_id,message_id,series_name,document_id,expected_size,season,episode,extension,published_at,status,created_at,updated_at)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(channel_id,message_id) DO NOTHING`
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(channel_id,message_id) DO UPDATE SET
+          series_name=excluded.series_name,document_id=excluded.document_id,expected_size=excluded.expected_size,
+          status=excluded.status,attempts=0,next_retry_at=0,last_error=NULL,matched=1
+          WHERE downloads.status NOT IN ('completed','downloading') AND
+          (downloads.series_name!=excluded.series_name OR downloads.document_id!=excluded.document_id OR downloads.matched=0)`
             )
             .run(
               t.channel_id,
@@ -243,11 +267,13 @@ export class Database {
         )
         this.sql
           .prepare(
-            `UPDATE downloads SET season=?,episode=?,published_at=?,updated_at=? WHERE channel_id=? AND message_id=? AND document_id=? AND series_name=? AND status NOT IN ('completed','downloading')`
+            `UPDATE downloads SET season=?,episode=?,extension=?,expected_size=?,published_at=?,updated_at=? WHERE channel_id=? AND message_id=? AND document_id=? AND series_name=? AND status NOT IN ('completed','downloading')`
           )
           .run(
             t.season,
             t.episode,
+            t.extension,
+            t.expected_size,
             t.published_at,
             now(),
             t.channel_id,
@@ -283,7 +309,7 @@ export class Database {
       this.selectLatest()
       const task = this.sql
         .prepare(
-          `SELECT ${DOWNLOAD_COLUMNS} FROM downloads WHERE status IN ('pending','retry_wait') AND next_retry_at<=?
+          `SELECT ${DOWNLOAD_COLUMNS} FROM downloads WHERE matched=1 AND status IN ('pending','retry_wait') AND next_retry_at<=?
         AND channel_id IN (SELECT value FROM json_each(?)) ORDER BY created_at,channel_id,message_id LIMIT 1`
         )
         .get(now(), JSON.stringify(channels)) as Download | undefined
@@ -364,7 +390,7 @@ export class Database {
     return this.transaction(() => {
       const result = this.sql
         .prepare(
-          "UPDATE downloads SET status='pending',attempts=0,next_retry_at=0,last_error=NULL WHERE channel_id=? AND message_id=? AND status='failed'"
+          "UPDATE downloads SET status='pending',attempts=0,next_retry_at=0,last_error=NULL WHERE channel_id=? AND message_id=? AND status='failed' AND matched=1"
         )
         .run(channel, message)
       this.selectLatest()

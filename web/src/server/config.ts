@@ -182,6 +182,36 @@ export type Candidate = {
   published_at: number
 }
 const videos = new Set([".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".ts"])
+export function matchingRules(
+  config: Config,
+  names: string[],
+  message: MediaMessage,
+  album = ""
+) {
+  const own = normalize(message.text + " " + (message.document?.filename || ""))
+  const hits = (text: string) =>
+    config.series.filter((rule) =>
+      [rule.name, ...(rule.aliases || [])].some((alias) =>
+        text.includes(normalize(alias))
+      )
+    )
+  const text = hits(own).length ? own : normalize(own + " " + album)
+  const exclusions = normalize(own + " " + album)
+  const rules = hits(text).filter(
+    (rule) =>
+      names.includes(rule.name) &&
+      !(rule.exclude_keywords || []).some((value) => {
+        const keyword = normalize(value)
+        return /^[a-z0-9]+$/.test(keyword)
+          ? new RegExp(`(?:^|[^a-z0-9])${keyword}(?:$|[^a-z0-9])`).test(
+              exclusions
+            )
+          : exclusions.includes(keyword)
+      })
+  )
+  return { rules, text }
+}
+
 export function match(
   config: Config,
   channel: number,
@@ -202,31 +232,13 @@ export function match(
     )
   )
     return null
-  const own = normalize(message.text + " " + doc.filename)
-  const hits = (text: string) =>
-    config.series.filter((r) =>
-      (r.aliases || [r.name]).some((a) => text.includes(normalize(a)))
-    )
-  const text = hits(own).length ? own : normalize(own + " " + album)
-  const rules = (
-    identified
-      ? config.series.filter((rule) => rule.name === identified.series_name)
-      : hits(text)
-  ).filter((r) => names.includes(r.name))
+  const matched = matchingRules(config, names, message, album)
+  const { text } = matched
+  const rules = identified
+    ? matched.rules.filter((rule) => rule.name === identified.series_name)
+    : matched.rules
   if (rules.length !== 1) return null
-  const rule = rules[0],
-    exclusions = normalize(own + " " + album)
-  if (
-    (rule.exclude_keywords || []).some((k) => {
-      const keyword = normalize(k)
-      return /^[a-z0-9]+$/.test(keyword)
-        ? new RegExp(`(?:^|[^a-z0-9])${keyword}(?:$|[^a-z0-9])`).test(
-            exclusions
-          )
-        : exclusions.includes(keyword)
-    })
-  )
-    return null
+  const rule = rules[0]
   let season = identified?.season ?? rule.default_season ?? 1,
     episode: number | null = identified?.episode ?? null
   const chineseSeason = text.match(/第\s*([一二两三四五六七八九十0-9]+)\s*季/)

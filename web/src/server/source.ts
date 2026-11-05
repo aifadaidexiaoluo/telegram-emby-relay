@@ -1,5 +1,5 @@
-import { now } from "./config.ts"
-import { identifyMedia } from "./ai.ts"
+import { match, now } from "./config.ts"
+import { AIResultError, identifyMedia } from "./ai.ts"
 import { floodSeconds, rpcName } from "./telegram.ts"
 import type { Config } from "../lib/types.ts"
 import type { MediaMessage } from "./config.ts"
@@ -40,25 +40,44 @@ export class Source {
         name: "FloodWaitError",
       })
   }
-  async ingest(channel: number, messages: MediaMessage[], cursor?: number) {
+  async ingest(
+    channel: number,
+    messages: MediaMessage[],
+    cursor?: number,
+    context = messages
+  ) {
     if (!this.active) return
-    const album = messages.some((m) => m.groupedId)
-      ? messages.map((m) => m.text).join(" ")
-      : ""
-    const tasks = []
+    const tasks = [],
+      rejected: number[] = []
     for (const message of messages) {
       this.check()
+      const album = message.groupedId
+        ? context
+            .filter((item) => item.groupedId === message.groupedId)
+            .map((item) => item.text)
+            .join(" ")
+        : ""
+      const names = this.db.channels.get(channel) || []
       const task = await identifyMedia(
         this.config,
         channel,
-        this.db.channels.get(channel) || [],
+        names,
         message,
         album
-      )
+      ).catch((error: unknown) => {
+        if (!(error instanceof AIResultError)) throw error
+        console.warn("已忽略无效 AI 识别结果，使用本地规则继续扫描", {
+          channel,
+          message_id: message.id,
+          reason: error.message,
+        })
+        return match(this.config, channel, names, message, album)
+      })
       if (task) tasks.push(task)
+      else rejected.push(message.id)
     }
     this.check()
-    this.db.enqueue(tasks, channel, cursor)
+    this.db.enqueue(tasks, channel, cursor, rejected)
   }
   async groupContext(channel: number, value: MediaMessage) {
     if (!value.groupedId) return [value]
@@ -126,7 +145,7 @@ export class Source {
           ).values(),
         ]
       first = false
-      group = group.filter(
+      const selected = group.filter(
         (m) =>
           (since === undefined || m.date >= since) &&
           (until === undefined || m.date < until)
@@ -134,8 +153,9 @@ export class Source {
       this.check()
       await this.ingest(
         channel,
-        group,
-        checkpoint ? Math.max(...pending.map((m) => m.id)) : undefined
+        selected,
+        checkpoint ? Math.max(...pending.map((m) => m.id)) : undefined,
+        group
       )
       pending = []
     }
