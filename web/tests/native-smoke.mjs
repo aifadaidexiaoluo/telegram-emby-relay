@@ -20,7 +20,7 @@ const env = {
   DATABASE_PATH: join(root, "downloads.sqlite3"),
   TG_SESSION_PATH: join(root, "telegram.session"),
   CONFIG_PATH: join(root, "configuration/config.json"),
-  MEDIA_ROOT: join(root, "media/TV"),
+  MEDIA_ROOT: join(root, "media"),
   TEMP_ROOT: join(root, "temp"),
 }
 delete env.RELAY_TEST_MODE

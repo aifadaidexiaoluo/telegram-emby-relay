@@ -2,6 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router"
 import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { Empty, Field, Heading, Panel } from "@/components/common"
 import { useWorkspace } from "@/components/workspace"
 import { validateConfig } from "@/lib/validation"
@@ -52,6 +53,23 @@ function Settings() {
     const key = String(form.get("emby_api_key") || "").trim()
     if (key) next.emby_api_key = key
     else delete next.emby_api_key
+    next.categories = String(form.get("categories") || "")
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .filter(Boolean)
+    const aiUrl = String(form.get("ai_base_url") || "")
+      .trim()
+      .replace(/\/+$/, "")
+    const aiModel = String(form.get("ai_model") || "").trim()
+    if (aiUrl || aiModel || form.get("ai_enabled")) {
+      next.ai = {
+        enabled: form.get("ai_enabled") === "on",
+        base_url: aiUrl,
+        model: aiModel,
+      }
+      const aiKey = String(form.get("ai_api_key") || "").trim()
+      if (aiKey) next.ai.api_key = aiKey
+    } else delete next.ai
     try {
       validateConfig(next)
       w.edit(() => next)
@@ -128,6 +146,62 @@ function Settings() {
                       maxLength={1024}
                       defaultValue={w.config.emby_api_key || ""}
                       placeholder="填写 API Key"
+                    />
+                  </Field>
+                </div>
+                <Field
+                  label="文件分类（每行一个）"
+                  help="例如电影、动漫。作品选择分类后保存到媒体根目录下的同名目录；未分类仍使用 TV。删除前需先调整使用该分类的作品。"
+                >
+                  <Textarea
+                    name="categories"
+                    rows={4}
+                    defaultValue={w.config.categories?.join("\n") ?? ""}
+                    placeholder={"电影\n动漫"}
+                  />
+                </Field>
+                <Field
+                  label="AI 剧名与集数识别"
+                  help="规则无法确定作品或集数时调用 AI。消息文字、相册文字与文件名会发送给你配置的接口；不会上传视频。"
+                >
+                  <label>
+                    <input
+                      type="checkbox"
+                      name="ai_enabled"
+                      defaultChecked={w.config.ai?.enabled ?? false}
+                    />{" "}
+                    启用 AI 识别
+                  </label>
+                </Field>
+                <div className="form-grid">
+                  <Field
+                    label="AI 接口地址"
+                    help="兼容 OpenAI 的 API 基地址，例如 https://api.openai.com/v1。"
+                  >
+                    <Input
+                      name="ai_base_url"
+                      type="url"
+                      defaultValue={w.config.ai?.base_url ?? ""}
+                      placeholder="https://api.openai.com/v1"
+                    />
+                  </Field>
+                  <Field label="AI 模型">
+                    <Input
+                      name="ai_model"
+                      defaultValue={w.config.ai?.model ?? ""}
+                      placeholder="模型名称"
+                    />
+                  </Field>
+                  <Field
+                    label="AI API Key"
+                    help="留空保留已保存的 Key；本地无鉴权接口可以不填。保存后不回显。"
+                  >
+                    <Input
+                      name="ai_api_key"
+                      type="password"
+                      autoComplete="new-password"
+                      maxLength={1024}
+                      defaultValue={w.config.ai?.api_key ?? ""}
                     />
                   </Field>
                 </div>

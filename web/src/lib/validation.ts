@@ -56,17 +56,63 @@ export function validateConfig(value: unknown): asserts value is Config {
     requireValue(!/[\r\n\x00]/.test(value.emby_api_key), "Emby Key 格式无效")
   }
   requireValue(Array.isArray(value.series), "作品列表格式不正确")
-  requireValue(
-    Array.isArray(value.channels) &&
-      (value.channels.length === 0 || value.series.length > 0),
-    "配置频道时至少保留一部作品"
-  )
+  requireValue(Array.isArray(value.channels), "频道列表格式不正确")
+  if (value.categories !== undefined) {
+    strings(value.categories)
+    requireValue(
+      new Set(value.categories as string[]).size ===
+        (value.categories as string[]).length,
+      "分类不能重复"
+    )
+    for (const category of value.categories as string[]) {
+      text(category, 100)
+      requireValue(
+        category === category.trim() &&
+          !/[<>:"/\\|?*\x00-\x1f\x7f]/.test(category) &&
+          !/^[ .]|[ .]$/.test(category),
+        "分类必须是有效的单层目录名称"
+      )
+    }
+  }
+  if (value.ai !== undefined) {
+    object(value.ai)
+    requireValue(typeof value.ai.enabled === "boolean", "AI 开关格式无效")
+    text(value.ai.base_url, 2000)
+    let url: URL
+    try {
+      url = new URL(value.ai.base_url)
+    } catch {
+      throw new Error("AI 接口地址格式无效")
+    }
+    requireValue(
+      ["http:", "https:"].includes(url.protocol) &&
+        Boolean(url.hostname) &&
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash,
+      "AI 接口必须是无凭据、无查询参数的 HTTP(S) 地址"
+    )
+    text(value.ai.model, 200)
+    if (value.ai.api_key !== undefined) {
+      text(value.ai.api_key, 1024)
+      requireValue(!/[\r\n\x00]/.test(value.ai.api_key), "AI Key 格式无效")
+    }
+  }
   const names = new Set<string>()
   for (const rule of value.series) {
     object(rule)
     text(rule.name, 100)
     requireValue(!names.has(rule.name), "作品名称不能重复")
     names.add(rule.name)
+    if (rule.category !== undefined) {
+      text(rule.category, 100)
+      requireValue(
+        Array.isArray(value.categories) &&
+          value.categories.includes(rule.category),
+        "作品分类必须先在设置中添加"
+      )
+    }
     for (const key of ["aliases", "exclude_keywords", "episode_patterns"])
       if (rule[key] !== undefined) strings(rule[key])
     for (const key of ["default_season", "fixed_season"])
@@ -110,15 +156,7 @@ export function validateConfig(value: unknown): asserts value is Config {
       )
     }
     if (channel.account_id !== undefined) text(channel.account_id)
-    strings(channel.series)
-    requireValue(
-      (channel.series as string[]).length > 0,
-      "频道至少选择一部作品"
-    )
-    requireValue(
-      (channel.series as string[]).every((name) => names.has(name)),
-      "频道引用了不存在的作品"
-    )
+    if (channel.series !== undefined) strings(channel.series)
     const reference = String(
       channel.id ?? (channel.url as string).replace(/\/$/, "").toLowerCase()
     )
@@ -249,21 +287,18 @@ export function configImpacts(before: Config, after: Config): string[] {
       impacts.push(
         `移除频道 ${key(channel)}：停止监听，未完成任务可能被取消；已完成媒体保留。`
       )
-    else if (
-      next.account_id !== channel.account_id ||
-      JSON.stringify(next.series) !== JSON.stringify(channel.series)
-    )
+    else if (next.account_id !== channel.account_id)
       impacts.push(
-        `调整频道 ${key(channel)} 的账号或白名单：重新选择候选，未完成任务可能被取消；新增作品需补扫历史。`
+        `调整频道 ${key(channel)} 的账号：重新连接频道并自动匹配全部作品。`
       )
   }
   if (
     after.channels.some((c) => !before.channels.some((t) => key(c) === key(t)))
   )
-    impacts.push("新增频道：请确认账号有访问权限，旧历史可能需要手动补扫。")
+    impacts.push("新增频道：自动选择有读取权限的已登录账号并搜索作品。")
   if (JSON.stringify(before.series) !== JSON.stringify(after.series))
     impacts.push(
-      "作品规则改变：重新选择最新剧集，未完成任务可能被取消；已完成文件保留。"
+      "作品规则改变：自动重新搜索全部频道历史，已完成文件保留；首次搜索可能耗时较长。"
     )
   if (
     before.emby_base_url !== after.emby_base_url ||

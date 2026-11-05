@@ -9,7 +9,7 @@ import {
   DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Empty, Field, Heading, Panel } from "@/components/common"
+import { Empty, Field, Heading, Panel, SelectInput } from "@/components/common"
 import { useWorkspace } from "@/components/workspace"
 import { validateConfig } from "@/lib/validation"
 import type { Series } from "@/lib/types"
@@ -20,6 +20,7 @@ function SeriesPage() {
     [editing, setEditing] = useState<number | null>(null),
     [remove, setRemove] = useState<number | null>(null)
   const [name, setName] = useState(""),
+    [category, setCategory] = useState(""),
     [limit, setLimit] = useState(""),
     [aliases, setAliases] = useState(""),
     [excludes, setExcludes] = useState(""),
@@ -36,12 +37,14 @@ function SeriesPage() {
       json: Record<string, unknown> = { ...rule }
     for (const key of [
       "name",
+      "category",
       "aliases",
       "exclude_keywords",
       "latest_episodes",
     ])
       delete json[key]
     setName(rule?.name ?? "")
+    setCategory(rule?.category ?? "")
     setLimit(
       rule?.latest_episodes === undefined ? "" : String(rule.latest_episodes)
     )
@@ -67,6 +70,7 @@ function SeriesPage() {
         episode_patterns: undefined,
         ...json,
         name: name.trim(),
+        category: category || undefined,
         aliases: aliases.trim() ? list(aliases) : [name.trim()],
         exclude_keywords: list(excludes),
         latest_episodes: limit === "" ? undefined : Number(limit),
@@ -74,11 +78,6 @@ function SeriesPage() {
       const next = structuredClone(w.config)
       if (editing < 0) next.series.push(rule)
       else next.series[editing] = rule
-      if (old && old.name !== rule.name)
-        next.channels = next.channels.map((c) => ({
-          ...c,
-          series: c.series.map((s) => (s === old.name ? rule.name : s)),
-        }))
       validateConfig(next)
       w.edit(() => next)
       setEditing(null)
@@ -89,13 +88,8 @@ function SeriesPage() {
   }
   const removeRule = () => {
     if (!w.config || remove === null) return
-    const next = structuredClone(w.config),
-      removed = next.series[remove]
+    const next = structuredClone(w.config)
     next.series.splice(remove, 1)
-    next.channels = next.channels.map((c) => ({
-      ...c,
-      series: c.series.filter((s) => s !== removed.name),
-    }))
     try {
       validateConfig(next)
       w.edit(() => next)
@@ -139,6 +133,7 @@ function SeriesPage() {
                 ? `固定第 ${rule.fixed_season} 季`
                 : "按规则识别季集"}
             </p>
+            <p className="muted">文件分类：{rule.category ?? "TV（默认）"}</p>
             <div className="chips">
               {rule.aliases?.map((alias, i) => (
                 <span key={i}>{alias}</span>
@@ -172,7 +167,7 @@ function SeriesPage() {
       {!w.config?.series.length && (
         <Empty>
           {w.config
-            ? "尚未配置作品。添加作品后可在频道中设置白名单。"
+            ? "尚未配置作品。添加后将自动在全部频道中搜索。"
             : "等待后端连接后读取作品配置。"}
         </Empty>
       )}
@@ -187,7 +182,7 @@ function SeriesPage() {
             {editing === -1 ? "添加作品" : "编辑作品规则"}
           </DialogTitle>
           <DialogDescription>
-            保存到当前工作空间草稿；作品重命名同步更新频道引用。后端将校验正则、目录冲突与完整配置。
+            保存并应用后自动在全部频道中搜索。分类决定新下载文件的目录，已完成文件保留原位。
           </DialogDescription>
           <form className="form-stack" onSubmit={save}>
             <div className="form-grid">
@@ -197,6 +192,23 @@ function SeriesPage() {
                   maxLength={100}
                   value={name}
                   onChange={(e) => setName(e.target.value)}
+                />
+              </Field>
+              <Field
+                label="文件分类"
+                help="可在设置页自定义分类；留空使用 TV 目录。"
+              >
+                <SelectInput
+                  value={category}
+                  onValueChange={setCategory}
+                  placeholder="TV（默认）"
+                  options={[
+                    { value: "", label: "TV（默认）" },
+                    ...(w.config?.categories ?? []).map((value) => ({
+                      value,
+                      label: value,
+                    })),
+                  ]}
                 />
               </Field>
               <Field
@@ -272,18 +284,11 @@ function SeriesPage() {
             移除 {remove !== null && w.config?.series[remove]?.name}
           </DialogTitle>
           <DialogDescription>
-            同时移除所有频道对此作品的引用。应用后可能取消未完成任务，历史记录和已完成媒体保留。
+            应用后停止在全部频道中搜索此作品，可能取消未完成任务，历史记录和已完成媒体保留。
           </DialogDescription>
           <p>
-            关联频道：
-            {remove !== null
-              ? w.config?.channels
-                  .filter((c) =>
-                    c.series.includes(w.config!.series[remove].name)
-                  )
-                  .map((c) => c.url ?? c.id)
-                  .join("、") || "无"
-              : "无"}
+            搜索频道：
+            {w.config?.channels.map((c) => c.url ?? c.id).join("、") || "无"}
           </p>
           {error && (
             <p role="alert" className="error">
@@ -299,7 +304,7 @@ function SeriesPage() {
               disabled={w.save.isPending}
               onClick={removeRule}
             >
-              从草稿移除作品和引用
+              从草稿移除作品
             </Button>
           </div>
         </DialogContent>

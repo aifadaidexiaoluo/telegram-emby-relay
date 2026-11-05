@@ -55,6 +55,28 @@ test("empty workspace renders seven Chinese routes and desktop themes at target 
   await expect(theme).toHaveAttribute("aria-pressed", String(!wasDark))
   expect(errors).toEqual([])
 })
+test("channel form only needs an address and permits configuring channels before works", async ({
+  page,
+  request,
+}) => {
+  await page.goto("/channels")
+  await page.getByRole("button", { name: "添加频道", exact: true }).click()
+  const dialog = page.getByRole("dialog")
+  await expect(dialog.getByRole("textbox")).toHaveCount(1)
+  await expect(dialog.getByRole("combobox")).toHaveCount(0)
+  await dialog
+    .getByLabel("公开 t.me URL 或数值频道 ID")
+    .fill("https://t.me/test_channel")
+  await dialog.getByRole("button", { name: "保存到草稿" }).click()
+  await page.getByRole("button", { name: "检查并应用" }).click()
+  await page.getByRole("button", { name: "确认应用", exact: true }).click()
+  await expect(page.getByRole("dialog")).toHaveCount(0)
+  const state = await (await request.get(`${api}/test-state`)).json()
+  expect(state.config.channels[0].url).toBe("https://t.me/test_channel")
+  expect(state.config.channels[0].series).toBeUndefined()
+  expect(state.config.series).toEqual([])
+})
+
 test("backend unavailable keeps navigation and marks retained data stale", async ({
   page,
   request,
@@ -202,7 +224,7 @@ test("series and channel editors preserve extensions; conflict retains draft unt
   await expect(page.getByText("配置已应用。")).toBeVisible()
   let state = await (await request.get(`${api}/test-state`)).json()
   expect(state.config.series[0].extension_field).toEqual({ preserved: true })
-  expect(state.config.channels[0].series).toEqual(["重命名作品"])
+  expect(state.channels[0].series).toEqual(["重命名作品"])
   await page
     .getByRole("navigation")
     .getByRole("link", { name: "频道", exact: true })
@@ -229,6 +251,13 @@ test("settings save waits for guarded tasks and preserves all values", async ({
   await page.getByLabel("全局下载并发").fill("4")
   await page.getByLabel("Emby 接口地址").fill("http://emby-fixture:8096/emby")
   await page.getByLabel("Emby API Key").fill("isolated-emby-key")
+  await page.getByLabel("文件分类（每行一个）").fill("电影\n动漫")
+  await page.getByLabel("启用 AI 识别").check()
+  await page
+    .getByLabel("AI 接口地址", { exact: true })
+    .fill("https://ai.test/v1")
+  await page.getByLabel("AI 模型", { exact: true }).fill("test-model")
+  await page.getByLabel("AI API Key", { exact: true }).fill("isolated-ai-key")
   await page.getByRole("button", { name: "保存设置并检查影响" }).click()
   await page.getByRole("button", { name: "确认应用", exact: true }).click()
   await expect(page.getByRole("dialog")).toContainText("仍有在途下载或补扫")
@@ -243,10 +272,30 @@ test("settings save waits for guarded tasks and preserves all values", async ({
   expect(state.config.emby_base_url).toBe("http://emby-fixture:8096/emby")
   expect(state.config.emby_api_key).toBeUndefined()
   expect(state.emby.configured).toBeTruthy()
+  expect(state.config.categories).toEqual(["电影", "动漫"])
+  expect(state.config.ai).toEqual({
+    enabled: true,
+    base_url: "https://ai.test/v1",
+    model: "test-model",
+  })
+  await expect(page.getByLabel("AI API Key", { exact: true })).toHaveValue("")
   await expect(page.getByLabel("Emby API Key")).toHaveValue("")
   expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain(
     "isolated-emby-key"
   )
+  expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain(
+    "isolated-ai-key"
+  )
+  await page.goto("/series")
+  await page.getByRole("button", { name: "编辑规则" }).click()
+  await page.getByRole("combobox", { name: "文件分类", exact: true }).click()
+  await page.getByRole("option", { name: "动漫", exact: true }).click()
+  await page.getByRole("button", { name: "保存到草稿" }).click()
+  await page.getByRole("button", { name: "检查并应用" }).click()
+  await page.getByRole("button", { name: "确认应用", exact: true }).click()
+  await expect(page.getByRole("dialog")).toHaveCount(0)
+  const saved = await (await request.get(`${api}/test-state`)).json()
+  expect(saved.config.series[0].category).toBe("动漫")
 })
 test("tasks paginate/filter/details/retry and scans submit Shanghai ISO", async ({
   page,

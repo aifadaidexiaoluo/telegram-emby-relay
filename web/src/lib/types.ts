@@ -1,5 +1,6 @@
 export type Series = {
   name: string
+  category?: string
   aliases?: string[]
   exclude_keywords?: string[]
   episode_patterns?: string[]
@@ -12,11 +13,18 @@ export type ConfigChannel = {
   id?: number
   url?: string
   account_id?: string
-  series: string[]
+  series?: string[]
 }
 export type Config = {
   channels: ConfigChannel[]
   series: Series[]
+  categories?: string[]
+  ai?: {
+    enabled: boolean
+    base_url: string
+    model: string
+    api_key?: string
+  }
   download_concurrency: number
   scan_interval_seconds: number
   initial_history_days: number

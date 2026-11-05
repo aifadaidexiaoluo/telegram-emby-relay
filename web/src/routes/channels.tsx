@@ -8,15 +8,8 @@ import {
   DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog"
-import {
-  DataTable,
-  Field,
-  Heading,
-  Panel,
-  SelectInput,
-  Status,
-} from "@/components/common"
-import { time, statusLabels, useWorkspace } from "@/components/workspace"
+import { DataTable, Field, Heading, Panel, Status } from "@/components/common"
+import { time, useWorkspace } from "@/components/workspace"
 import { validateConfig } from "@/lib/validation"
 import type { ConfigChannel } from "@/lib/types"
 
@@ -26,8 +19,6 @@ function Channels() {
     [editing, setEditing] = useState<number | null>(null),
     [remove, setRemove] = useState<number | null>(null)
   const [reference, setReference] = useState(""),
-    [account, setAccount] = useState(""),
-    [series, setSeries] = useState<string[]>([]),
     [error, setError] = useState("")
   const runtimeOf = (c: ConfigChannel) =>
     w.data?.channels.find(
@@ -45,33 +36,24 @@ function Channels() {
     w.edit((config) => config)
     const channel = w.config?.channels[index]
     setReference(String(channel?.url ?? channel?.id ?? ""))
-    setAccount(
-      channel?.account_id ??
-        (channel ? runtimeOf(channel)?.account_id : undefined) ??
-        ""
-    )
-    setSeries(channel?.series ?? [])
     setError("")
     setEditing(index)
   }
-  const eligible =
-    w.data?.accounts.filter(
-      (a) => a.user_id !== null && a.status !== "login_required"
-    ) ?? []
   const save = (event: React.FormEvent) => {
     event.preventDefault()
     if (editing === null || !w.config) return
     try {
-      if (!eligible.some((a) => a.id === account))
-        throw new Error("请选择已登录的负责账号。")
-      const value = reference.trim(),
-        previous = editing >= 0 ? w.config.channels[editing] : undefined
-      const { id: _id, url: _url, ...rest } = previous ?? {}
+      const value = reference.trim()
+      const {
+        id: _id,
+        url: _url,
+        account_id: _account,
+        series: _series,
+        ...rest
+      } = editing >= 0 ? w.config.channels[editing] : {}
       const channel: ConfigChannel = {
         ...rest,
         ...(/^-?\d+$/.test(value) ? { id: Number(value) } : { url: value }),
-        account_id: account,
-        series,
       }
       const next = structuredClone(w.config)
       if (editing < 0) next.channels.push(channel)
@@ -88,7 +70,7 @@ function Channels() {
     <>
       <Heading
         title="频道"
-        description="维护频道白名单、负责账号与允许作品，保留每个频道的扫描游标。"
+        description="填写频道地址即可，系统自动选择账号并在全部频道中搜索已添加作品。"
         action={
           <Button
             disabled={!w.config || w.save.isPending}
@@ -103,7 +85,7 @@ function Channels() {
           headers={[
             "频道",
             "负责账号",
-            "允许作品",
+            "匹配作品",
             "游标",
             "最近成功 / 状态",
             "操作",
@@ -119,7 +101,7 @@ function Channels() {
                 )?.name ??
                   c.account_id ??
                   "未绑定",
-                c.series.join("、") || "无白名单作品",
+                `全部作品（${w.config?.series.length ?? 0}）`,
                 runtime?.last_scanned_message_id ?? "尚未读取",
                 <div>
                   {time(runtime?.last_success_at)}
@@ -173,7 +155,7 @@ function Channels() {
         <DialogContent className="modal">
           <DialogTitle>{editing === -1 ? "添加频道" : "编辑频道"}</DialogTitle>
           <DialogDescription>
-            一个频道指定一个已登录账号。服务端验证该账号是否有频道读取权限。
+            填写频道地址即可。系统自动选择有读取权限的已登录账号，匹配所有已添加作品。
           </DialogDescription>
           <form className="form-stack" onSubmit={save}>
             <Field label="公开 t.me URL 或数值频道 ID">
@@ -184,43 +166,6 @@ function Channels() {
                 placeholder="https://t.me/channel"
               />
             </Field>
-            <Field label="负责账号">
-              <SelectInput
-                required
-                value={account}
-                onValueChange={setAccount}
-                placeholder="请选择已登录账号"
-                options={eligible.map((a) => ({
-                  value: a.id,
-                  label: `${a.name} · ${statusLabels[a.status] ?? a.status}`,
-                }))}
-              />
-            </Field>
-            {!eligible.length && (
-              <p className="error">尚无已登录账号，请先在账号页面完成授权。</p>
-            )}
-            <fieldset className="checkbox-list">
-              <legend>允许作品</legend>
-              {w.config?.series.map((rule) => (
-                <label key={rule.name}>
-                  <input
-                    type="checkbox"
-                    checked={series.includes(rule.name)}
-                    onChange={(e) =>
-                      setSeries(
-                        e.target.checked
-                          ? [...series, rule.name]
-                          : series.filter((name) => name !== rule.name)
-                      )
-                    }
-                  />
-                  {rule.name}
-                </label>
-              ))}
-              {!w.config?.series.length && (
-                <p className="error">请先添加作品规则。</p>
-              )}
-            </fieldset>
             {error && (
               <p role="alert" className="error">
                 {error}
@@ -234,14 +179,7 @@ function Channels() {
               >
                 取消
               </Button>
-              <Button
-                type="submit"
-                disabled={
-                  w.save.isPending ||
-                  !eligible.length ||
-                  !w.config?.series.length
-                }
-              >
+              <Button type="submit" disabled={w.save.isPending}>
                 保存到草稿
               </Button>
             </div>

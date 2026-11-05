@@ -44,6 +44,7 @@ export class Database {
   sql: DatabaseSync
   limits = new Map<string, number>()
   channels = new Map<number, string[]>()
+  categories = new Map<string, string>()
   blocked = true
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
@@ -121,6 +122,9 @@ export class Database {
       .get(channel) as Checkpoint | undefined
   }
   configure(config: Config, channels: Map<number, string[]>, blocked: boolean) {
+    this.categories = new Map(
+      config.series.map((rule) => [rule.name, rule.category ?? "TV"])
+    )
     this.limits = new Map(
       config.series
         .filter((r) => r.latest_episodes)

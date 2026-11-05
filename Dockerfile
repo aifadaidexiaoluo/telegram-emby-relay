@@ -9,7 +9,7 @@ FROM node:24-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=3000 SERVER_SHUTDOWN_TIMEOUT=55 \
     DATABASE_PATH=/state/downloads.sqlite3 TG_SESSION_PATH=/state/telegram.session \
-    CONFIG_PATH=/configuration/config.json MEDIA_ROOT=/media/TV TEMP_ROOT=/tmp/telegram
+    CONFIG_PATH=/configuration/config.json MEDIA_ROOT=/media TEMP_ROOT=/tmp/telegram
 RUN mkdir -p /state /configuration /media/TV /media/.incoming /tmp/telegram \
     && chown -R node:node /state /configuration /media /tmp/telegram \
     && chmod 700 /state /configuration /media/.incoming /tmp/telegram

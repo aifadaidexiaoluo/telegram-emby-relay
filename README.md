@@ -78,6 +78,8 @@ node --env-file=.env .output/server/index.mjs
 
 ## Docker 部署
 
+当前宿主机已有部署的路径和升级约定见 [本机容器维护约定](container-readme.md)。维护该部署前先阅读该文件，保留用户指定的 `/mnt/wdc/emby` 共享媒体挂载，并从实际部署目录执行更新。
+
 在仓库根目录执行：
 
 ```sh
@@ -109,7 +111,7 @@ docker compose --env-file management.env -f compose.web.yaml logs -f web
 | --- | --- | --- |
 | `/state` | SQLite、账号信息、Telegram 会话与运行锁 | `relay_state` 命名卷 |
 | `/configuration` | 当前配置和上一版本备份，可能含 Emby Key | `relay_configuration` 命名卷 |
-| `/media/TV` | 最终季集媒体 | `./local-data/media/TV` |
+| `/media/TV`、`/media/<分类>` | 默认及分类媒体目录 | `./local-data/media/` 下的同名目录 |
 | `/media/.incoming` | 发布过程中的中间文件 | `./local-data/media/.incoming` |
 | `/tmp/telegram` | 未完成的下载文件 | `./local-data/temp` |
 
@@ -128,7 +130,7 @@ docker compose --env-file management.env -f compose.web.yaml logs -f web
 | `DATABASE_PATH` | SQLite 数据库路径 | `../local-data/state/downloads.sqlite3` |
 | `TG_SESSION_PATH` | Telegram 会话基路径 | `../local-data/state/telegram.session` |
 | `CONFIG_PATH` | 可写业务配置路径 | `../local-data/configuration/config.json` |
-| `MEDIA_ROOT` | 最终媒体目录 | `../local-data/media/TV` |
+| `MEDIA_ROOT` | 媒体根目录，分类目录位于其下 | `../local-data/media` |
 | `TEMP_ROOT` | 临时下载目录 | `../local-data/temp` |
 | `EMBY_BASE_URL` | 未在网页配置时的 Emby API 基地址 | `http://emby:8096/emby` |
 | `EMBY_API_KEY` | 未在网页配置时的 Emby Key | 空 |
@@ -141,13 +143,21 @@ Compose 还支持 `WEB_PORT`、`MEDIA_PATH`、`TEMP_PATH`、`TELEGRAM_STATE_VOLU
 
 | 字段 | 行为 |
 | --- | --- |
-| `channels` | 频道 ID 或地址、负责账号 `account_id`、关联作品名 |
-| `series` | 作品匹配、排除词、季集规则与最新集数限制 |
+| `channels` | 只需频道地址（兼容数值 ID）；自动选择可访问账号，匹配全部作品；旧 `series` 白名单不再限制搜索 |
+| `series` | 作品匹配、排除词、季集规则、最新集数限制和可选 `category` |
+| `categories` | 自定义文件分类列表，如 `["电影", "动漫"]`；分类只能是单层目录名称 |
+| `ai` | `enabled`、`base_url`、`model`、只写 `api_key`；使用兼容 OpenAI 的 `/chat/completions` 接口 |
 | `download_concurrency` | 全局下载并发，默认 `2`，范围 `1–16` |
 | `scan_interval_seconds` | 周期扫描间隔，默认 `1800` 秒 |
-| `initial_history_days` | 首次历史扫描范围，默认 `7` 天 |
+| `initial_history_days` | 兼容旧配置的首次扫描范围，默认 `7` 天；通过页面添加频道或变更作品时自动搜索全部历史 |
 | `edit_lookback_hours` | 编辑回看窗口，默认 `24` 小时 |
 | `emby_base_url` / `emby_api_key` | Emby 连接配置，Key 为只写字段 |
+
+在设置页每行填写一个文件分类，添加／编辑作品时选择分类。新媒体保存为 `<MEDIA_ROOT>/<分类>/<作品名>/Season XX/...`，未分类使用 `TV`；电影等无法确定集数的媒体仍进入作品下的“未识别集数”目录。修改分类不搬动已完成文件。升级前如自行设置了 `MEDIA_ROOT=.../TV`，应将其改为上一级媒体根目录；Compose 已改用 `/media`，宿主媒体挂载不变。
+
+添加作品或修改作品／AI 识别配置并应用后，会自动从全部频道历史重新搜索，按消息 ID 去重，已完成媒体保留。首次全量搜索可能耗时较长，并受到 Telegram 限流影响。
+
+AI 默认关闭。在设置页填写兼容 OpenAI 的 API 基地址（例如 `https://api.openai.com/v1`）、模型名称和 API Key 后启用。规则无法确定剧名或集数时，内置识别 Agent 会发送文件名、消息文字、相册文字及作品列表，**不会上传视频**；请自行选择可信接口并留意调用费用。返回结果必须属于已配置作品，且通过季集范围、排除词和固定季数规则校验。接口错误会重试扫描，不跳过游标；API Key 保存后不回显。该 Agent 不执行工具或消息中的指令。
 
 季集正则支持 JavaScript 命名组 `(?<episode>...)`，也兼容常见 Python 命名组 `(?P<episode>...)`，必须包含 `episode`。其他 Python 专用语法可能需要调整；无效正则会在保存时拒绝。
 

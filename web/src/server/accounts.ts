@@ -224,11 +224,27 @@ export class AccountManager {
       this.waits.set(phone, until)
       return new ManagementError("Telegram 限流，请等待后重试", 429, until)
     }
-    if (/PHONE_CODE_INVALID|PASSWORD_HASH_INVALID/.test(rpcName(error)))
+    const code = rpcName(error)
+    if (/PHONE_CODE_INVALID|PASSWORD_HASH_INVALID/.test(code))
       return new ManagementError("验证码或两步验证密码错误")
-    if (/PHONE_CODE_EXPIRED/.test(rpcName(error)))
+    if (/PHONE_CODE_EXPIRED/.test(code))
       return new ManagementError("验证码已过期，请重发")
-    return new ManagementError("Telegram 登录失败，请核对输入或稍后重试", 503)
+    if (/API_ID_INVALID|API_ID_PUBLISHED_FLOOD/.test(code))
+      return new ManagementError(
+        "Telegram API 凭据无效或受限，请检查 TG_API_ID 和 TG_API_HASH"
+      )
+    if (/PHONE_NUMBER_INVALID/.test(code))
+      return new ManagementError("手机号格式无效，请检查国家区号和号码格式")
+    if (/PHONE_NUMBER_BANNED|USER_DEACTIVATED_BAN/.test(code))
+      return new ManagementError("该 Telegram 账号已被限制，无法登录")
+    if (/^[A-Z][A-Z0-9_]*(?:_\d+)?$/.test(code))
+      console.error(`[Telegram login] RPC ${code}`)
+    else if (error instanceof Error)
+      console.error(`[Telegram login] ${error.name}`)
+    return new ManagementError(
+      "Telegram 登录失败，请检查服务日志中的安全错误代码或稍后重试",
+      503
+    )
   }
   removeSession(path: string) {
     for (const suffix of [".string", "", "-journal", "-wal", "-shm"])

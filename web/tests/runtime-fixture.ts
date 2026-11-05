@@ -16,7 +16,7 @@ const runtime = new ManagementRuntime(
     database: join(root, "downloads.sqlite3"),
     session: join(root, "legacy.session"),
     config: join(root, "configuration/config.json"),
-    media: join(root, "media/TV"),
+    media: join(root, "media"),
     temp: join(root, "temp"),
     embyUrl: "http://127.0.0.1:18766/emby",
     embyKey: "",

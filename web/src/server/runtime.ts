@@ -192,7 +192,9 @@ export class ManagementRuntime {
   }
   publicConfig(): Config {
     const { emby_api_key: _key, ...config } = this.raw
-    return structuredClone({ ...config, emby_base_url: this.embyUrl() })
+    const result = structuredClone({ ...config, emby_base_url: this.embyUrl() })
+    if (result.ai) delete result.ai.api_key
+    return result
   }
   owner(channel: number) {
     return (
@@ -288,7 +290,10 @@ export class ManagementRuntime {
         for (const [index, entity] of [...entities.values()].entries()) {
           const ref = reference(items[index])
           this.resolved.set(ref, entity.id)
-          channels.set(entity.id, items[index].series)
+          channels.set(
+            entity.id,
+            this.raw.series.map((rule) => rule.name)
+          )
           this.db.sql
             .prepare(
               "INSERT INTO telegram_channel_ids(reference,channel_id) VALUES(?,?) ON CONFLICT(reference) DO UPDATE SET channel_id=excluded.channel_id"
@@ -314,7 +319,11 @@ export class ManagementRuntime {
     }
     for (const item of this.raw.channels) {
       const id = this.resolved.get(reference(item))
-      if (id !== undefined) channels.set(id, item.series)
+      if (id !== undefined)
+        channels.set(
+          id,
+          this.raw.series.map((rule) => rule.name)
+        )
     }
     this.db.configure(
       this.raw,
@@ -385,7 +394,9 @@ export class ManagementRuntime {
           if (result.completed) this.pending.delete(channel)
           else this.pending.set(channel, now() + result.delay)
           state.status = result.completed ? "completed" : "waiting"
-          state.last_error = result.completed ? null : "检查未完成，等待重试"
+          state.last_error = result.completed
+            ? null
+            : source.lastError || "检查未完成，等待重试"
           state.finished_at = now()
         })
         .finally(() => {
@@ -405,22 +416,49 @@ export class ManagementRuntime {
     const next = structuredClone(data)
     if (next.emby_api_key === undefined)
       next.emby_api_key = this.raw.emby_api_key
-    const records = this.db.records(),
-      fallback = records.find((r) => r.id === "legacy")?.id || records[0]?.id
+    if (next.ai && next.ai.api_key === undefined)
+      next.ai.api_key = this.raw.ai?.api_key
+    const records = this.db.records()
     const identities = new Set<number>()
     for (const item of next.channels) {
-      const id = item.account_id || fallback,
-        client = id ? this.accounts.clients.get(id) : undefined
-      if (!client || !id || this.accounts.errors.has(id) || !client.connected)
-        throw new ManagementError("频道必须指定可用的已登录账号")
-      const entity = await client.entity(reference(item))
-      if (
-        identities.has(entity.id) ||
-        (item.id !== undefined && entity.id !== item.id)
-      )
-        throw new ManagementError("频道重复或 ID 不符")
-      identities.add(entity.id)
-      item.account_id = id
+      let resolved = false
+      const candidates = item.account_id
+        ? records.filter((record) => record.id === item.account_id)
+        : records
+      for (const record of candidates) {
+        const id = record.id,
+          client = this.accounts.clients.get(id)
+        if (
+          !client ||
+          this.accounts.errors.has(id) ||
+          !client.connected ||
+          (this.accounts.waits.get("account:" + id) || 0) > now()
+        )
+          continue
+        let entity
+        try {
+          entity = await client.entity(reference(item))
+        } catch (error) {
+          const seconds = floodSeconds(error)
+          if (seconds !== undefined)
+            this.accounts.waits.set("account:" + id, now() + seconds + 1)
+          continue
+        }
+        if (
+          identities.has(entity.id) ||
+          (item.id !== undefined && entity.id !== item.id)
+        )
+          throw new ManagementError("频道重复或 ID 不符")
+        identities.add(entity.id)
+        item.account_id = id
+        delete item.series
+        resolved = true
+        break
+      }
+      if (!resolved)
+        throw new ManagementError(
+          "没有可读取该频道的已登录账号，请检查频道地址及账号权限"
+        )
     }
     const connectionChanged =
       (next.emby_base_url ?? this.settings.embyUrl).replace(/\/+$/, "") !==
@@ -432,6 +470,15 @@ export class ManagementRuntime {
         JSON.stringify(this.raw, null, 2) + "\n"
       )
     atomicWrite(this.settings.config, JSON.stringify(next, null, 2) + "\n")
+    if (
+      JSON.stringify(this.raw.series) !== JSON.stringify(next.series) ||
+      JSON.stringify(this.raw.ai) !== JSON.stringify(next.ai)
+    ) {
+      this.db.sql.exec(
+        "UPDATE channel_checkpoints SET initial_since=0,last_scanned_message_id=0,first_scan_complete=0"
+      )
+    }
+    for (const id of identities) this.db.checkpoint(id, 0)
     this.raw = next
     this.version = version(next)
     if (connectionChanged)
@@ -540,7 +587,7 @@ export class ManagementRuntime {
         reference: ref,
         id,
         account_id: account,
-        series: item.series,
+        series: this.raw.series.map((rule) => rule.name),
         last_scanned_message_id: checkpoint?.last_scanned_message_id || 0,
         last_success_at: checkpoint?.last_success_at ?? null,
         first_scan_complete: !!checkpoint?.first_scan_complete,
@@ -608,6 +655,7 @@ export class ManagementRuntime {
       .all(...params, (filters.page - 1) * 50)
     const names = new Map(this.db.records().map((r) => [r.id, r.name]))
     const items = rows.map((row) => {
+      // SAFETY: DOWNLOAD_COLUMNS follows the downloads schema and casts document_id to text.
       const task = row as unknown as ReturnType<Database["tasks"]>[number],
         account = this.owner(task.channel_id)
       let downloaded = task.status === "completed" ? task.expected_size : 0

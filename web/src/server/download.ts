@@ -99,7 +99,7 @@ export class Downloader {
   constructor(db: Database, settings: Settings) {
     this.db = db
     this.settings = settings
-    this.incoming = join(dirname(settings.media), ".incoming")
+    this.incoming = join(settings.media, ".incoming")
   }
   tempPath(task: Download) {
     return join(
@@ -129,7 +129,11 @@ export class Downloader {
         })
         continue
       }
-      const target = finalPath(this.settings.media, task)
+      const target = finalPath(
+        this.settings.media,
+        task,
+        this.db.categories.get(task.series_name)
+      )
       if (await exists(target)) {
         if (await verified(target, task.expected_size))
           this.db.completed(task, target)
@@ -165,7 +169,11 @@ export class Downloader {
         })
         return
       }
-      const target = finalPath(this.settings.media, task)
+      const target = finalPath(
+        this.settings.media,
+        task,
+        this.db.categories.get(task.series_name)
+      )
       if (await exists(target)) {
         if (!(await verified(target, task.expected_size)))
           throw new PermanentDownloadError("最终文件冲突，禁止覆盖")

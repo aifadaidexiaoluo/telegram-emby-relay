@@ -109,7 +109,7 @@ function sync() {
     reference: c.url ?? String(c.id),
     id: c.id ?? -100123,
     account_id: c.account_id ?? null,
-    series: c.series,
+    series: state.config.series.map((rule) => rule.name),
     last_scanned_message_id: 12,
     last_success_at: now(),
     first_scan_complete: true,
@@ -261,6 +261,13 @@ createServer(async (req, res) => {
     if (blocked) return error(res, 409, "仍有在途下载或补扫，请等待")
     const { emby_api_key, ...config } = body.config
     if (emby_api_key !== undefined) savedEmbyKey = emby_api_key
+    if (config.ai) delete config.ai.api_key
+    config.channels = config.channels.map(
+      ({ series: _series, ...channel }) => ({
+        ...channel,
+        account_id: channel.account_id || "account-a",
+      })
+    )
     state.config = config
     state.emby.configured = !!savedEmbyKey
     state.version = `v${++generation}`

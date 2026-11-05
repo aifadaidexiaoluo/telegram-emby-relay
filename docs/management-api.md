@@ -23,6 +23,12 @@
 
 Config 原字段保持不变，新增 `emby_base_url?: string` 和写入专用 `emby_api_key?: string`。地址允许 HTTP(S)，禁止用户名／密码、查询参数和 fragment，刷新路径为 `/Library/Refresh`。Key 必须非空且不含换行；省略 Key 保留已配置值。环境变量提供默认值，页面保存的值优先。
 
-状态响应的 `config` **删除 emby_api_key**，只返回 `emby.configured`；`version` 覆盖完整私密配置的版本。配置文件和上一版本备份用 `0600` 保存，不能公开。媒体 `document_id` 返回十进制字符串，与旧 64 位 SQLite INTEGER 等值；其他安全范围整数仍为 number。
+Config 的频道只需要 `url`（兼容 `id`），`account_id` 可选，未指定时自动尝试可访问的已登录账号。旧频道 `series` 字段仅为读取兼容，所有频道均匹配完整作品列表。允许先添加频道再添加作品；应用作品／AI 识别配置变更后自动从全部频道历史重新搜索。新增频道也会搜索全部历史。
+
+`categories?: string[]` 定义单层媒体分类目录，`series[].category?: string` 必须引用其中一项；未分类使用 `TV`。`MEDIA_ROOT` 为各分类共同的父目录。分类变更仅影响后续下载，保留已有文件。
+
+`ai?: {enabled:boolean,base_url:string,model:string,api_key?:string}` 配置兼容 OpenAI 的识别接口。规则无法识别作品／集数时调用 `<base_url>/chat/completions`，仅发送文字与文件名，限制输出为已配置作品与有效季集；接口错误会保留扫描游标并重试。AI 地址同样限制为无凭据／查询参数／fragment 的 HTTP(S) URL，省略 `api_key` 保留旧值，关闭功能使用 `enabled:false`。
+
+状态响应的 `config` **删除 emby_api_key 和 ai.api_key**，只返回 Emby 密钥状态 `emby.configured`；`version` 覆盖完整私密配置的版本。配置文件和上一版本备份用 `0600` 保存，不能公开。媒体 `document_id` 返回十进制字符串，与旧 64 位 SQLite INTEGER 等值；其他安全范围整数仍为 number。
 
 测试中的 `/internal` 仅为 `tests/runtime-fixture.ts` 和 `tests/mock-management.mjs` 提供的隔离桥接接口，使用独立测试令牌并只监听内部回环端口；它们不部署到产品。

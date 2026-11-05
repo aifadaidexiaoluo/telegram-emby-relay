@@ -106,17 +106,14 @@ test("empty management config is valid and unknown properties are not stripped",
   validateConfig(config)
   assert.deepEqual(config.series[0].extension_field, { preserved: true })
   assert.equal(config.channels[0].extension_field, "kept")
-  assert.throws(
-    () => validateConfig({ ...empty, channels: [{ id: -100123, series: [] }] }),
-    /至少/
+  assert.doesNotThrow(() =>
+    validateConfig({ ...empty, channels: [{ id: -100123 }] })
   )
 })
-test("config rejects dangling references, duplicate names, invalid mapping and ambiguous channels", () => {
+test("config accepts legacy channel lists but rejects duplicate names, invalid mapping and ambiguous channels", () => {
   const base = { ...empty, series: [{ name: "测试作品" }] }
-  assert.throws(
-    () =>
-      validateConfig({ ...base, channels: [{ id: 1, series: ["未知作品"] }] }),
-    /不存在/
+  assert.doesNotThrow(() =>
+    validateConfig({ ...base, channels: [{ id: 1, series: ["未知作品"] }] })
   )
   assert.throws(
     () =>
@@ -211,4 +208,43 @@ test("destructive config changes list affected channels and series", () => {
   assert.ok(
     impacts.some((v) => v.includes("-100123") && v.includes("媒体保留"))
   )
+})
+
+test("categories validate directory names and prevent deleting a category in use", () => {
+  const config = {
+    ...empty,
+    categories: ["电影", "动漫"],
+    series: [{ name: "测试作品", category: "动漫" }],
+  }
+  assert.doesNotThrow(() => validateConfig(config))
+  for (const categories of [
+    ["电影"],
+    ["../动漫"],
+    ["动漫/新番"],
+    ["."],
+    ["动漫", "动漫"],
+    [" 动漫"],
+  ]) {
+    assert.throws(() => validateConfig({ ...config, categories }))
+  }
+})
+
+test("AI config validates endpoints, model and secret headers", () => {
+  const ai = {
+    enabled: true,
+    base_url: "http://localhost:11434/v1",
+    model: "local-model",
+    api_key: "secret",
+  }
+  assert.doesNotThrow(() => validateConfig({ ...empty, ai }))
+  for (const patch of [
+    { base_url: "bad-url" },
+    { base_url: "file:///tmp/test" },
+    { base_url: "https://user:secret@host/v1" },
+    { model: "" },
+    { api_key: "bad\r\nheader" },
+    { enabled: "yes" },
+  ]) {
+    assert.throws(() => validateConfig({ ...empty, ai: { ...ai, ...patch } }))
+  }
 })

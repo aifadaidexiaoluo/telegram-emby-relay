@@ -52,7 +52,7 @@ export function settingsFromEnv() {
     config: resolve(
       process.env.CONFIG_PATH || "../local-data/configuration/config.json"
     ),
-    media: resolve(process.env.MEDIA_ROOT || "../local-data/media/TV"),
+    media: resolve(process.env.MEDIA_ROOT || "../local-data/media"),
     temp: resolve(process.env.TEMP_ROOT || "../local-data/temp"),
     embyUrl: process.env.EMBY_BASE_URL || "http://emby:8096/emby",
     embyKey: process.env.EMBY_API_KEY || "",
@@ -187,7 +187,8 @@ export function match(
   channel: number,
   names: string[],
   message: MediaMessage,
-  album = ""
+  album = "",
+  identified?: { series_name: string; season: number; episode: number | null }
 ): Candidate | null {
   const doc = message.document
   if (!doc || !Number.isSafeInteger(doc.size) || doc.size <= 0) return null
@@ -207,8 +208,12 @@ export function match(
       (r.aliases || [r.name]).some((a) => text.includes(normalize(a)))
     )
   const text = hits(own).length ? own : normalize(own + " " + album)
-  const rules = hits(text)
-  if (rules.length !== 1 || !names.includes(rules[0].name)) return null
+  const rules = (
+    identified
+      ? config.series.filter((rule) => rule.name === identified.series_name)
+      : hits(text)
+  ).filter((r) => names.includes(r.name))
+  if (rules.length !== 1) return null
   const rule = rules[0],
     exclusions = normalize(own + " " + album)
   if (
@@ -222,8 +227,8 @@ export function match(
     })
   )
     return null
-  let season = rule.default_season ?? 1,
-    episode: number | null = null
+  let season = identified?.season ?? rule.default_season ?? 1,
+    episode: number | null = identified?.episode ?? null
   const chineseSeason = text.match(/第\s*([一二两三四五六七八九十0-9]+)\s*季/)
   if (chineseSeason) season = parseNumber(chineseSeason[1])
   for (const pattern of rule.episode_patterns || []) {
@@ -278,13 +283,14 @@ export function match(
     published_at: message.date,
   }
 }
-export function finalPath(media: string, task: Candidate) {
+export function finalPath(media: string, task: Candidate, category = "TV") {
   const title = safeName(task.series_name),
     identity = `ch${Math.abs(task.channel_id)}-m${task.message_id}`
   if (!videos.has(task.extension)) throw new ManagementError("媒体扩展名无效")
   const label = `S${String(task.season).padStart(2, "0")}E${String(task.episode).padStart(3, "0")}`
   return join(
     media,
+    safeName(category),
     title,
     task.episode === null
       ? "未识别集数"

@@ -123,7 +123,8 @@ export const createTransport: TransportFactory = async (path, settings) => {
   const client = new TelegramClient(session, settings.apiId, settings.apiHash, {
     floodSleepThreshold: 0,
     connectionRetries: 3,
-    requestRetries: 1,
+    // Allow teleproto to retry auth requests after PHONE_MIGRATE DC switching.
+    requestRetries: 3,
     autoReconnect: true,
     timeout: 15,
   })

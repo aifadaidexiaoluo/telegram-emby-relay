@@ -22,6 +22,7 @@ import {
 } from "../src/server/config.ts"
 import { Database } from "../src/server/database.ts"
 import { ManagementRuntime } from "../src/server/runtime.ts"
+import { AccountManager } from "../src/server/accounts.ts"
 import {
   Downloader,
   publish,
@@ -48,7 +49,7 @@ function setup(t: { after: (fn: () => unknown) => void }) {
     database: join(root, "downloads.sqlite3"),
     session: join(root, "telegram.session"),
     config: join(root, "config/config.json"),
-    media: join(root, "media/TV"),
+    media: join(root, "media"),
     temp: join(root, "temp"),
     embyUrl: "http://fixture.invalid/emby",
     embyKey: "",
@@ -56,6 +57,23 @@ function setup(t: { after: (fn: () => unknown) => void }) {
   t.after(() => rmSync(root, { recursive: true, force: true }))
   return { root, settings }
 }
+test("Telegram login reports API credential and phone RPC errors without masking them", (t) => {
+  const { settings } = setup(t)
+  const db = new Database(settings.database)
+  t.after(() => db.close())
+  const accounts = new AccountManager(db, settings, fakeFactory, () => {})
+  const apiError = accounts.loginError(
+    { errorMessage: "API_ID_INVALID" },
+    "test-phone"
+  )
+  assert.match(apiError.message, /TG_API_ID 和 TG_API_HASH/)
+  const phoneError = accounts.loginError(
+    { errorMessage: "PHONE_NUMBER_INVALID" },
+    "test-phone"
+  )
+  assert.match(phoneError.message, /手机号格式无效/)
+})
+
 const rules: Config = {
   ...defaults,
   channels: [
@@ -692,4 +710,114 @@ test("manual backfill leaves normal cursor intact and requires a subsequent sele
   assert.equal(runtime.db.tasks()[0].episode, 157)
   assert.equal(runtime.db.tasks()[0].status, "cancelled")
   await runtime.close()
+})
+
+test("address-only channels select an accessible account and new works rescan old messages into categories", async (t) => {
+  const { settings } = setup(t)
+  const runtime = new ManagementRuntime(settings, fakeFactory)
+  t.after(() => runtime.close())
+  await runtime.downloader.prepare()
+  runtime.restoring = false
+  for (const id of ["a", "b"]) {
+    const client = new FakeTransport(settings.session + id)
+    client.loggedIn = true
+    client.userId = id === "a" ? 1 : 2
+    if (id === "a") client.data.clear()
+    else client.data.set(PRIMARY, [mediaMessage(1, "吞噬星空 第157集", 1)])
+    await client.connect()
+    await runtime.accounts.saveAccount(id, id, client, settings.session + id)
+    runtime.accounts.clients.set(id, client)
+  }
+  await runtime.applyConfig(
+    { ...defaults, channels: [{ url: "https://t.me/fixtureprimary" }] },
+    runtime.version
+  )
+  assert.equal(runtime.raw.channels[0].account_id, "b")
+  assert.equal(runtime.raw.channels[0].series, undefined)
+  runtime.db.sql
+    .prepare(
+      "UPDATE channel_checkpoints SET last_scanned_message_id=100,first_scan_complete=1 WHERE channel_id=?"
+    )
+    .run(PRIMARY)
+  const config: Config = {
+    ...runtime.publicConfig(),
+    categories: ["动漫"],
+    series: [{ name: "吞噬星空", category: "动漫" }],
+    ai: {
+      enabled: false,
+      base_url: "https://ai.test/v1",
+      model: "test-model",
+      api_key: "private-ai-key",
+    },
+  }
+  await runtime.applyConfig(config, runtime.version)
+  assert.equal(runtime.db.getCheckpoint(PRIMARY)!.last_scanned_message_id, 0)
+  assert.equal(runtime.db.getCheckpoint(PRIMARY)!.initial_since, 0)
+  assert.deepEqual(runtime.db.channels.get(PRIMARY), ["吞噬星空"])
+  assert.equal(runtime.db.categories.get("吞噬星空"), "动漫")
+  assert.equal(runtime.state().config.ai?.api_key, undefined)
+  await runtime.applyConfig(runtime.publicConfig(), runtime.version)
+  assert.equal(runtime.raw.ai?.api_key, "private-ai-key")
+  const source = runtime.sources.get("b")!
+  assert.equal((await source.scan(PRIMARY)).completed, true)
+  const candidate = runtime.db.tasks()[0]
+  assert.equal(candidate.episode, 157)
+  await runtime.downloader.process(
+    candidate,
+    source.client,
+    source.entities.get(PRIMARY)!,
+    () => {},
+    () => {}
+  )
+  const completed = runtime.db.tasks()[0]
+  assert.equal(completed.status, "completed")
+  assert.ok(completed.final_path?.startsWith(join(settings.media, "动漫")))
+  assert.equal(readFileSync(completed.final_path!, "utf8"), "data")
+})
+
+test("AI failure keeps history cursor for retry and exposes a safe scan error", async (t) => {
+  const { settings } = setup(t)
+  const db = new Database(settings.database)
+  t.after(() => db.close())
+  const config: Config = {
+    ...rules,
+    ai: { enabled: true, base_url: "https://ai.test/v1", model: "test" },
+  }
+  db.configure(config, new Map([[PRIMARY, ["吞噬星空"]]]), false)
+  db.checkpoint(PRIMARY, 0)
+  const client = new FakeTransport(settings.session)
+  client.data.set(PRIMARY, [mediaMessage(1, "unrecognized title", 1)])
+  const source = new Source(
+    client,
+    new Map([[PRIMARY, { id: PRIMARY }]]),
+    config,
+    db
+  )
+  const provider = t.mock.method(
+    globalThis,
+    "fetch",
+    async () => new Response("private-provider-detail", { status: 503 })
+  )
+  assert.equal((await source.scan(PRIMARY)).completed, false)
+  assert.equal(db.getCheckpoint(PRIMARY)!.last_scanned_message_id, 0)
+  assert.equal(db.tasks().length, 0)
+  assert.match(source.lastError!, /AI 识别请求失败 \(503\)/)
+  provider.mock.mockImplementation(async () =>
+    Response.json({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              series_name: "吞噬星空",
+              season: 1,
+              episode: 159,
+            }),
+          },
+        },
+      ],
+    })
+  )
+  assert.equal((await source.scan(PRIMARY)).completed, true)
+  assert.equal(db.getCheckpoint(PRIMARY)!.last_scanned_message_id, 1)
+  assert.equal(db.tasks()[0].episode, 159)
 })

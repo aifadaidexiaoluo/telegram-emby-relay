@@ -81,8 +81,7 @@ function Overview() {
                   s.name,
                   s.latest_episodes ? `最新 ${s.latest_episodes} 集` : "无限量",
                   s.aliases?.join("、") || "—",
-                  state.config.channels.filter((c) => c.series.includes(s.name))
-                    .length,
+                  state.config.channels.length,
                 ],
               }))}
             />

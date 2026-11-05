@@ -1,4 +1,5 @@
-import { match, now } from "./config.ts"
+import { now } from "./config.ts"
+import { identifyMedia } from "./ai.ts"
 import { floodSeconds, rpcName } from "./telegram.ts"
 import type { Config } from "../lib/types.ts"
 import type { MediaMessage } from "./config.ts"
@@ -11,6 +12,7 @@ export class Source {
   generation = 0
   requested = false
   authorizationError = false
+  lastError: string | null = null
   unsubscribe = () => {}
   client: Transport
   entities: Map<number, TelegramEntity>
@@ -38,26 +40,25 @@ export class Source {
         name: "FloodWaitError",
       })
   }
-  ingest(channel: number, messages: MediaMessage[], cursor?: number) {
+  async ingest(channel: number, messages: MediaMessage[], cursor?: number) {
     if (!this.active) return
     const album = messages.some((m) => m.groupedId)
       ? messages.map((m) => m.text).join(" ")
       : ""
-    this.db.enqueue(
-      messages
-        .map((m) =>
-          match(
-            this.config,
-            channel,
-            this.db.channels.get(channel) || [],
-            m,
-            album
-          )
-        )
-        .filter((t) => t !== null),
-      channel,
-      cursor
-    )
+    const tasks = []
+    for (const message of messages) {
+      this.check()
+      const task = await identifyMedia(
+        this.config,
+        channel,
+        this.db.channels.get(channel) || [],
+        message,
+        album
+      )
+      if (task) tasks.push(task)
+    }
+    this.check()
+    this.db.enqueue(tasks, channel, cursor)
   }
   async groupContext(channel: number, value: MediaMessage) {
     if (!value.groupedId) return [value]
@@ -83,7 +84,7 @@ export class Source {
       async (channel, messages, edited) => {
         if (!this.active || !this.entities.has(channel)) return
         try {
-          this.ingest(
+          await this.ingest(
             channel,
             edited ? await this.groupContext(channel, messages[0]) : messages
           )
@@ -131,7 +132,7 @@ export class Source {
           (until === undefined || m.date < until)
       )
       this.check()
-      this.ingest(
+      await this.ingest(
         channel,
         group,
         checkpoint ? Math.max(...pending.map((m) => m.id)) : undefined
@@ -156,6 +157,7 @@ export class Source {
     if (checkpoint) this.db.enqueue([], channel, Math.max(last, upper))
   }
   async scan(channel: number) {
+    this.lastError = null
     const generation = this.generation
     try {
       this.db.holdSelection(channel)
@@ -183,6 +185,10 @@ export class Source {
       }
       return { completed: false, delay: 0 }
     } catch (error) {
+      this.lastError =
+        error instanceof Error && error.message.startsWith("AI ")
+          ? error.message
+          : "频道扫描失败，等待重试"
       const seconds = floodSeconds(error)
       if (seconds !== undefined) {
         this.flood(seconds)

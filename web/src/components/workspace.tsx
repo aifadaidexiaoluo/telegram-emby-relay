@@ -67,7 +67,10 @@ function useWorkspaceValue(initial: ApiResult<State>) {
       try {
         return unwrap(await writeManagement({ data }))
       } finally {
-        if (data.action === "config") delete data.config.emby_api_key
+        if (data.action === "config") {
+          delete data.config.emby_api_key
+          if (data.config.ai) delete data.config.ai.api_key
+        }
       }
     },
     onSuccess: () => client.invalidateQueries({ queryKey: ["state"] }),
@@ -89,7 +92,10 @@ function useWorkspaceValue(initial: ApiResult<State>) {
         version: override ? query.data.version : draft.version,
         config: structuredClone(draft.config),
       })
-      const { emby_api_key: _key, ...savedConfig } = draft.config
+      const { emby_api_key: _key, ...savedConfig } = structuredClone(
+        draft.config
+      )
+      if (savedConfig.ai) delete savedConfig.ai.api_key
       if ("version" in result && result.version)
         client.setQueryData<State>(["state"], (old) =>
           old ? { ...old, config: savedConfig, version: result.version! } : old
