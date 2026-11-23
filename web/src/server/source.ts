@@ -1,8 +1,9 @@
-import { match, now } from "./config.ts"
+import { matchingRules, now } from "./config.ts"
 import { AIResultError, identifyMedia } from "./ai.ts"
+import { MANUAL_EPISODE } from "./database.ts"
 import { floodSeconds, rpcName } from "./telegram.ts"
 import type { Config } from "../lib/types.ts"
-import type { MediaMessage } from "./config.ts"
+import type { Candidate, MediaMessage } from "./config.ts"
 import type { Database } from "./database.ts"
 import type { Transport, TelegramEntity } from "./telegram.ts"
 
@@ -18,16 +19,19 @@ export class Source {
   entities: Map<number, TelegramEntity>
   private config: Config
   private db: Database
+  private reclassify?: (task: Candidate) => Promise<void>
   constructor(
     client: Transport,
     entities: Map<number, TelegramEntity>,
     config: Config,
-    db: Database
+    db: Database,
+    reclassify?: (task: Candidate) => Promise<void>
   ) {
     this.client = client
     this.entities = entities
     this.config = config
     this.db = db
+    this.reclassify = reclassify
   }
   flood(seconds: number) {
     this.notBefore = Math.max(this.notBefore, now() + seconds + 1)
@@ -48,7 +52,8 @@ export class Source {
   ) {
     if (!this.active) return
     const tasks = [],
-      rejected: number[] = []
+      rejected: number[] = [],
+      excluded: number[] = []
     for (const message of messages) {
       this.check()
       const album = message.groupedId
@@ -58,6 +63,7 @@ export class Source {
             .join(" ")
         : ""
       const names = this.db.channels.get(channel) || []
+      let reason: string | null = null
       const task = await identifyMedia(
         this.config,
         channel,
@@ -66,18 +72,58 @@ export class Source {
         album
       ).catch((error: unknown) => {
         if (!(error instanceof AIResultError)) throw error
-        console.warn("已忽略无效 AI 识别结果，使用本地规则继续扫描", {
+        reason = error.message
+        console.warn("已忽略无效 AI 识别结果，跳过当前视频继续扫描", {
           channel,
           message_id: message.id,
           reason: error.message,
         })
-        return match(this.config, channel, names, message, album)
+        return null
       })
-      if (task) tasks.push(task)
-      else rejected.push(message.id)
+      if (
+        message.document &&
+        matchingRules(this.config, names, message, album, true).rules.length
+      ) {
+        this.db.sql
+          .prepare(
+            "INSERT INTO media_identifications(channel_id,message_id,document_id,source_metadata,decision,reason,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(channel_id,message_id) DO UPDATE SET document_id=excluded.document_id,source_metadata=excluded.source_metadata,decision=excluded.decision,reason=excluded.reason,updated_at=excluded.updated_at"
+          )
+          .run(
+            channel,
+            message.id,
+            message.document.id,
+            JSON.stringify({ message, album }),
+            task?.content_type ?? (task ? "episode" : "unknown"),
+            task?.identification_reason ??
+              reason ??
+              (!task ? "AI 无法确定作品或季集，等待核实" : null),
+            now()
+          )
+        if (!task)
+          this.db.sql
+            .prepare(
+              "UPDATE downloads SET identification_reason=? WHERE channel_id=? AND message_id=? AND identification_reason IS NOT ?"
+            )
+            .run(
+              `待核实：${reason ?? "AI 无法确定作品或季集"}`,
+              channel,
+              message.id,
+              MANUAL_EPISODE
+            )
+      }
+      if (task) {
+        if (this.config.ai?.enabled) await this.reclassify?.(task)
+        tasks.push(task)
+      } else {
+        rejected.push(message.id)
+        if (
+          !matchingRules(this.config, names, message, album, true).rules.length
+        )
+          excluded.push(message.id)
+      }
     }
     this.check()
-    this.db.enqueue(tasks, channel, cursor, rejected)
+    this.db.enqueue(tasks, channel, cursor, rejected, excluded)
   }
   async groupContext(channel: number, value: MediaMessage) {
     if (!value.groupedId) return [value]

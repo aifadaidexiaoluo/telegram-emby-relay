@@ -8,7 +8,20 @@ export type Series = {
   fixed_season?: number
   season_aliases?: Record<string, number>
   latest_episodes?: number
+  media_type?: "animation" | "series" | "movie"
+  production_locations?: string[]
+  genres?: string[]
+  metadata_sources?: string[]
+  episode_mappings?: EpisodeMapping[]
 }
+export type EpisodeMapping = {
+  absolute_start: number
+  absolute_end: number
+  season: number
+  episode_start: number
+  source: string
+}
+export type ContentType = "episode" | "trailer" | "extra" | "unknown"
 export type ConfigChannel = {
   id?: number
   url?: string
@@ -98,6 +111,9 @@ export type Task = {
   last_error: string | null
   created_at: number
   updated_at: number
+  content_type?: ContentType
+  absolute_episode?: number | null
+  identification_reason?: string | null
   account_id: string | null
   account_name: string | null
 }
@@ -131,6 +147,13 @@ export type Write =
   | { action: "password"; id: string; password: string }
   | { action: "resend" | "cancel" | "logout"; id: string }
   | { action: "retry"; channel: number; message: number }
+  | {
+      action: "enqueue"
+      link: string
+      series: string
+      season: number
+      episode: number
+    }
   | { action: "scan"; channel?: number; since: string; until: string }
   | { action: "config"; version: string; config: Config }
 export type WriteResult = Login | { ok: true; version?: string; count?: number }

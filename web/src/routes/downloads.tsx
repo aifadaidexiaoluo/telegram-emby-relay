@@ -68,7 +68,9 @@ function DownloadsPage() {
   })
   const [input, setInput] = useState(filters),
     [detail, setDetail] = useState<Task | null>(null),
-    [confirm, setConfirm] = useState(false)
+    [confirm, setConfirm] = useState(false),
+    [enqueueOpen, setEnqueueOpen] = useState(false),
+    [enqueueSeries, setEnqueueSeries] = useState("")
   const query = useQuery({
     queryKey: ["downloads", filters],
     queryFn: async () => unwrap(await readDownloads({ data: filters })),
@@ -103,15 +105,106 @@ function DownloadsPage() {
         title="下载任务"
         description="查询作品、来源与任务状态；时间均为 Asia/Shanghai。"
         action={
-          <Button
-            variant="outline"
-            disabled={query.isFetching}
-            onClick={() => query.refetch()}
-          >
-            刷新任务
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              onClick={() => {
+                operation.reset()
+                setEnqueueSeries("")
+                setEnqueueOpen(true)
+              }}
+            >
+              添加 Telegram 下载
+            </Button>
+            <Button
+              variant="outline"
+              disabled={query.isFetching}
+              onClick={() => query.refetch()}
+            >
+              刷新任务
+            </Button>
+          </div>
         }
       />
+      <Dialog open={enqueueOpen} onOpenChange={setEnqueueOpen}>
+        <DialogContent>
+          <DialogTitle>添加 Telegram 下载</DialogTitle>
+          <DialogDescription>
+            确认链接指向正片，并填写季集。任务仍受白名单和最新集数规则约束。
+          </DialogDescription>
+          <form
+            className="form-stack"
+            onSubmit={async (event) => {
+              event.preventDefault()
+              const form = new FormData(event.currentTarget)
+              if (
+                await operation.run(
+                  {
+                    action: "enqueue",
+                    link: String(form.get("link")).trim(),
+                    series: enqueueSeries,
+                    season: Number(form.get("season")),
+                    episode: Number(form.get("episode")),
+                  },
+                  "已添加候选，请查看下载状态。"
+                )
+              ) {
+                setEnqueueOpen(false)
+                await client.invalidateQueries({ queryKey: ["downloads"] })
+              }
+            }}
+          >
+            <Field label="Telegram 消息链接">
+              <Input name="link" type="url" required maxLength={100} />
+            </Field>
+            <Field label="作品">
+              <SelectInput
+                value={enqueueSeries}
+                onValueChange={setEnqueueSeries}
+                placeholder="选择作品"
+                required
+                options={(w.config?.series ?? []).map(({ name }) => ({
+                  value: name,
+                  label: name,
+                }))}
+              />
+            </Field>
+            <div className="form-grid">
+              <Field label="季号">
+                <Input
+                  name="season"
+                  type="number"
+                  min={0}
+                  max={99}
+                  defaultValue={1}
+                  required
+                />
+              </Field>
+              <Field label="集号">
+                <Input
+                  name="episode"
+                  type="number"
+                  min={1}
+                  max={9999}
+                  required
+                />
+              </Field>
+            </div>
+            {operation.error && (
+              <p role="alert" className="error">
+                {operation.error.message}
+              </p>
+            )}
+            <div className="actions">
+              <Button
+                type="submit"
+                disabled={operation.isPending || !enqueueSeries}
+              >
+                提交下载
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
       <form
         className="toolbar"
         onSubmit={(event) => {
@@ -220,12 +313,29 @@ function DownloadsPage() {
             cells: [
               <div>
                 <strong>{t.series_name}</strong>
+                <span className="muted">
+                  {" "}
+                  ·{" "}
+                  {t.content_type === "trailer"
+                    ? "预告"
+                    : t.content_type === "extra"
+                      ? "花絮"
+                      : t.content_type === "unknown"
+                        ? "待核实"
+                        : "正片"}
+                </span>
                 <p className="muted">
                   S{String(t.season).padStart(2, "0")}E
                   {t.episode === null
                     ? "?"
                     : String(t.episode).padStart(3, "0")}
                 </p>
+                {t.absolute_episode != null && (
+                  <p className="muted">累计第 {t.absolute_episode} 集</p>
+                )}
+                {t.identification_reason?.startsWith("待核实") && (
+                  <p className="muted">{t.identification_reason}</p>
+                )}
               </div>,
               <div>
                 {t.channel_id}
@@ -303,6 +413,20 @@ function DownloadsPage() {
               <dd>
                 {current.season} / {current.episode ?? "无法识别"}
               </dd>
+              <dt>内容类型</dt>
+              <dd>
+                {current.content_type === "trailer"
+                  ? "预告"
+                  : current.content_type === "extra"
+                    ? "花絮"
+                    : current.content_type === "unknown"
+                      ? "待核实"
+                      : "正片"}
+              </dd>
+              <dt>累计集号</dt>
+              <dd>{current.absolute_episode ?? "未提供"}</dd>
+              <dt>识别依据</dt>
+              <dd>{current.identification_reason ?? "旧记录未保存依据"}</dd>
               <dt>来源频道</dt>
               <dd>{current.channel_id}</dd>
               <dt>消息 ID</dt>

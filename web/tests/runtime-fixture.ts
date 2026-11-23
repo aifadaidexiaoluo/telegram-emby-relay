@@ -71,6 +71,8 @@ const server = createServer(async (req, res) => {
       }
     const logout = path.match(/^\/internal\/accounts\/([^/]+)\/logout$/)
     if (logout) action = { action: "logout", id: logout[1] }
+    if (path === "/internal/downloads" && req.method === "POST")
+      action = { ...body, action: "enqueue" }
     const retry = path.match(/^\/internal\/downloads\/(-?\d+)\/(\d+)\/retry$/)
     if (retry)
       action = {

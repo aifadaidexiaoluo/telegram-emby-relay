@@ -11,7 +11,7 @@ import {
 } from "node:fs"
 import { dirname, join, resolve, extname } from "node:path"
 import { validateConfig } from "../lib/validation.ts"
-import type { Config, ConfigChannel } from "../lib/types.ts"
+import type { Config, ConfigChannel, ContentType } from "../lib/types.ts"
 
 export class ManagementError extends Error {
   status: number
@@ -168,6 +168,7 @@ export type MediaMessage = {
     mime: string
     filename: string
     video: boolean
+    duration?: number
   }
 }
 export type Candidate = {
@@ -180,13 +181,25 @@ export type Candidate = {
   episode: number | null
   extension: string
   published_at: number
+  content_type?: ContentType
+  absolute_episode?: number | null
+  identification_reason?: string | null
 }
 const videos = new Set([".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".ts"])
+const excludedMediaKeywords = [
+  "预告",
+  "先导片",
+  "花絮",
+  "trailer",
+  "teaser",
+  "pv",
+]
 export function matchingRules(
   config: Config,
   names: string[],
   message: MediaMessage,
-  album = ""
+  album = "",
+  includeExtras = false
 ) {
   const own = normalize(message.text + " " + (message.document?.filename || ""))
   const hits = (text: string) =>
@@ -195,12 +208,27 @@ export function matchingRules(
         text.includes(normalize(alias))
       )
     )
+  const captionTitles = [
+    ...normalize(message.text).matchAll(/《([^》]+)》/g),
+  ].map((found) => found[1])
+  if (
+    captionTitles.length &&
+    !captionTitles.some((title) => hits(title).length)
+  )
+    return { rules: [], text: own }
   const text = hits(own).length ? own : normalize(own + " " + album)
-  const exclusions = normalize(own + " " + album)
+  // A sibling's trailer caption must not exclude a video with its own title.
+  const exclusions =
+    hits(own).length && hits(normalize(album)).length
+      ? own
+      : normalize(own + " " + album)
   const rules = hits(text).filter(
     (rule) =>
       names.includes(rule.name) &&
-      !(rule.exclude_keywords || []).some((value) => {
+      ![
+        ...(includeExtras ? [] : excludedMediaKeywords),
+        ...(rule.exclude_keywords || []),
+      ].some((value) => {
         const keyword = normalize(value)
         return /^[a-z0-9]+$/.test(keyword)
           ? new RegExp(`(?:^|[^a-z0-9])${keyword}(?:$|[^a-z0-9])`).test(
@@ -218,7 +246,14 @@ export function match(
   names: string[],
   message: MediaMessage,
   album = "",
-  identified?: { series_name: string; season: number; episode: number | null }
+  identified?: {
+    series_name: string
+    season: number
+    episode: number | null
+    content_type?: ContentType
+    absolute_episode?: number | null
+    identification_reason?: string | null
+  }
 ): Candidate | null {
   const doc = message.document
   if (!doc || !Number.isSafeInteger(doc.size) || doc.size <= 0) return null
@@ -232,7 +267,13 @@ export function match(
     )
   )
     return null
-  const matched = matchingRules(config, names, message, album)
+  const matched = matchingRules(
+    config,
+    names,
+    message,
+    album,
+    !!identified?.content_type
+  )
   const { text } = matched
   const rules = identified
     ? matched.rules.filter((rule) => rule.name === identified.series_name)
@@ -241,29 +282,31 @@ export function match(
   const rule = rules[0]
   let season = identified?.season ?? rule.default_season ?? 1,
     episode: number | null = identified?.episode ?? null
-  const chineseSeason = text.match(/第\s*([一二两三四五六七八九十0-9]+)\s*季/)
-  if (chineseSeason) season = parseNumber(chineseSeason[1])
-  for (const pattern of rule.episode_patterns || []) {
-    const found = episodePattern(pattern).exec(text)
-    if (found) {
-      episode = Number(found.groups!.episode)
-      if (found.groups!.season) season = Number(found.groups!.season)
-      break
+  if (!identified) {
+    const chineseSeason = text.match(/第\s*([一二两三四五六七八九十0-9]+)\s*季/)
+    if (chineseSeason) season = parseNumber(chineseSeason[1])
+    for (const pattern of rule.episode_patterns || []) {
+      const found = episodePattern(pattern).exec(text)
+      if (found) {
+        episode = Number(found.groups!.episode)
+        if (found.groups!.season) season = Number(found.groups!.season)
+        break
+      }
     }
-  }
-  if (episode === null) {
-    const found = text.match(
-      /第\s*([零〇一二两三四五六七八九十百千0-9]+)\s*[集话]/
+    if (episode === null) {
+      const found = text.match(
+        /第\s*([零〇一二两三四五六七八九十百千0-9]+)\s*(?:\(\s*[零〇一二两三四五六七八九十百千0-9]+\s*\)\s*)?[集话]/
+      )
+      if (found) episode = parseNumber(found[1])
+    }
+    const aliasSeasons = new Set(
+      Object.entries(rule.season_aliases || {})
+        .filter(([a]) => text.includes(normalize(a)))
+        .map(([, s]) => s)
     )
-    if (found) episode = parseNumber(found[1])
+    if (aliasSeasons.size > 1) return null
+    if (aliasSeasons.size) season = [...aliasSeasons][0]
   }
-  const aliasSeasons = new Set(
-    Object.entries(rule.season_aliases || {})
-      .filter(([a]) => text.includes(normalize(a)))
-      .map(([, s]) => s)
-  )
-  if (aliasSeasons.size > 1) return null
-  if (aliasSeasons.size) season = [...aliasSeasons][0]
   season = rule.fixed_season ?? season
   if (
     !Number.isInteger(season) ||
@@ -271,7 +314,9 @@ export function match(
     season > 99 ||
     (episode !== null &&
       (!Number.isInteger(episode) || episode < 1 || episode > 9999)) ||
-    (episode === null && rule.latest_episodes)
+    (episode === null &&
+      rule.latest_episodes &&
+      (!identified?.content_type || identified.content_type === "episode"))
   )
     return null
   if (!videos.has(extension))
@@ -293,6 +338,13 @@ export function match(
     episode,
     extension,
     published_at: message.date,
+    ...(identified?.content_type
+      ? {
+          content_type: identified.content_type,
+          absolute_episode: identified.absolute_episode ?? null,
+          identification_reason: identified.identification_reason ?? null,
+        }
+      : {}),
   }
 }
 export function finalPath(media: string, task: Candidate, category = "TV") {
@@ -304,9 +356,16 @@ export function finalPath(media: string, task: Candidate, category = "TV") {
     media,
     safeName(category),
     title,
-    task.episode === null
-      ? "未识别集数"
-      : `Season ${String(task.season).padStart(2, "0")}`,
-    `${title} - ${task.episode === null ? identity : label + " - " + identity}${task.extension}`
+    ...(task.content_type === "trailer" || task.content_type === "extra"
+      ? ["trailers"]
+      : []),
+    ...(task.content_type === "trailer" || task.content_type === "extra"
+      ? []
+      : [
+          task.episode === null
+            ? "未识别集数"
+            : `Season ${String(task.season).padStart(2, "0")}`,
+        ]),
+    `${title} - ${task.episode === null ? identity : label + " - " + identity}${task.content_type === "trailer" ? " - 预告" : task.content_type === "extra" ? " - 花絮" : ""}${task.extension}`
   )
 }

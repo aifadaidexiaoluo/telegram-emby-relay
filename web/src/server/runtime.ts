@@ -2,7 +2,7 @@ import { existsSync, readFileSync, mkdirSync, lstatSync } from "node:fs"
 import { DatabaseSync } from "node:sqlite"
 import { dirname } from "node:path"
 import { AccountManager } from "./accounts.ts"
-import { Database, DOWNLOAD_COLUMNS } from "./database.ts"
+import { Database, DOWNLOAD_COLUMNS, MANUAL_EPISODE } from "./database.ts"
 import { Downloader } from "./download.ts"
 import { Source } from "./source.ts"
 import { refreshEmby } from "./emby.ts"
@@ -12,12 +12,17 @@ import {
   checkConfig,
   defaults,
   ManagementError,
+  match,
   now,
   reference,
   settingsFromEnv,
   version,
 } from "./config.ts"
-import { validateFilters, validateWrite } from "../lib/validation.ts"
+import {
+  telegramPost,
+  validateFilters,
+  validateWrite,
+} from "../lib/validation.ts"
 import type { Settings } from "./config.ts"
 import type { TransportFactory } from "./telegram.ts"
 import type {
@@ -56,6 +61,7 @@ export class ManagementRuntime {
   private nextRound = 0
   private nextRebuild = 0
   private refreshTask?: Promise<void>
+  private cleanupTask?: Promise<void>
   private instanceLock: DatabaseSync
   settings: Settings
   constructor(settings: Settings, factory: TransportFactory = createTransport) {
@@ -163,10 +169,23 @@ export class ManagementRuntime {
         this.refreshTask = refreshEmby(
           this.db,
           this.embyUrl(),
-          this.embyKey()
+          this.embyKey(),
+          fetch,
+          now(),
+          this.raw.series
         ).finally(() => {
           this.refreshTask = undefined
         })
+      }
+      if (!this.cleanupTask) {
+        this.cleanupTask = this.downloader
+          .cleanup()
+          .catch(() => {
+            console.warn("媒体清理失败，将自动重试")
+          })
+          .finally(() => {
+            this.cleanupTask = undefined
+          })
       }
     } finally {
       this.ticking = false
@@ -300,7 +319,12 @@ export class ManagementRuntime {
             )
             .run(ref, entity.id)
         }
-        this.sources.set(id, new Source(client, entities, this.raw, this.db))
+        this.sources.set(
+          id,
+          new Source(client, entities, this.raw, this.db, (task) =>
+            this.downloader.reclassify(task)
+          )
+        )
         this.accounts.errors.delete(id)
       } catch (error) {
         allResolved = false
@@ -678,6 +702,55 @@ export class ManagementRuntime {
     })
     return { items, total, page: filters.page, page_size: 50 }
   }
+  async enqueuePost(data: Extract<Write, { action: "enqueue" }>) {
+    const post = telegramPost(data.link)
+    const entry = [...this.resolved].find(
+      ([ref]) => ref.toLowerCase() === post.reference
+    )
+    const channel = entry?.[1]
+    const account = entry && this.bindings.get(entry[0])
+    const source = account ? this.sources.get(account) : undefined
+    const entity =
+      channel === undefined ? undefined : source?.entities.get(channel)
+    if (!source || !entity || channel === undefined)
+      throw new ManagementError("频道未配置或负责账号尚未就绪", 409)
+    const names = this.db.channels.get(channel) ?? []
+    if (!names.includes(data.series))
+      throw new ManagementError("该作品不在此频道的下载规则中")
+
+    let message
+    try {
+      source.check()
+      message = (await source.client.messages(entity, [post.message])).find(
+        (item) => item.id === post.message
+      )
+    } catch (error) {
+      const seconds = floodSeconds(error)
+      if (seconds !== undefined) source.flood(seconds)
+      throw new ManagementError("暂时无法读取 Telegram 消息，请稍后再试", 409)
+    }
+    const task =
+      message &&
+      match(this.raw, channel, names, message, "", {
+        series_name: data.series,
+        season: data.season,
+        episode: data.episode,
+      })
+    if (!task || task.season !== data.season)
+      throw new ManagementError(
+        "消息不是符合该作品规则的视频，或季号与作品规则冲突"
+      )
+    const existing = this.db.sql
+      .prepare(
+        "SELECT status FROM downloads WHERE channel_id=? AND message_id=?"
+      )
+      .get(channel, post.message)
+    if (existing?.status === "completed" || existing?.status === "downloading")
+      throw new ManagementError("这条消息已经下载完成或正在下载", 409)
+    this.db.enqueue([{ ...task, identification_reason: MANUAL_EPISODE }])
+    return { ok: true as const }
+  }
+
   async write(input: Write): Promise<WriteResult> {
     const data = validateWrite(input)
     return this.exclusive(async () => {
@@ -707,6 +780,8 @@ export class ManagementRuntime {
           return this.applyConfig(data.config, data.version)
         case "scan":
           return this.backfill(data.since, data.until, data.channel)
+        case "enqueue":
+          return this.enqueuePost(data)
         case "retry":
           if (!this.db.channels.has(data.channel))
             throw new ManagementError("任务所属频道已移出配置，不能重试", 409)
@@ -725,6 +800,7 @@ export class ManagementRuntime {
       ...this.scanning.values(),
       ...(this.backfillTask ? [this.backfillTask] : []),
       ...(this.refreshTask ? [this.refreshTask] : []),
+      ...(this.cleanupTask ? [this.cleanupTask] : []),
     ])
     await this.accounts.close()
     this.db.close()

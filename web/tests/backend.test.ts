@@ -103,6 +103,105 @@ function task(channel = PRIMARY, id = 1, episode = 157) {
   }
 }
 
+test("a completed trailer cannot block the real episode and is removed only after verified publication", async (t) => {
+  const { settings } = setup(t),
+    db = new Database(settings.database)
+  t.after(() => db.close())
+  db.configure(rules, new Map([[PRIMARY, ["吞噬星空"]]]), false)
+  db.checkpoint(PRIMARY, 0)
+  db.finishScan(PRIMARY)
+  const downloader = new Downloader(db, settings)
+  await downloader.prepare()
+  const trailer = {
+    ...task(PRIMARY, 1, 101),
+    content_type: "trailer" as const,
+    absolute_episode: 101,
+  }
+  db.enqueue([trailer])
+  const old = finalPath(settings.media, trailer)
+  mkdirSync(join(old, ".."), { recursive: true })
+  writeFileSync(old, "data")
+  db.completed(trailer, old)
+  const main = {
+    ...task(PRIMARY, 2, 101),
+    content_type: "episode" as const,
+    absolute_episode: 101,
+  }
+  db.enqueue([main])
+  assert.equal(db.claim([PRIMARY])?.message_id, 2)
+  await downloader.cleanup()
+  assert.equal(readFileSync(old, "utf8"), "data")
+  const target = finalPath(settings.media, main)
+  mkdirSync(join(target, ".."), { recursive: true })
+  writeFileSync(target, "data")
+  db.completed(main, target)
+  await downloader.cleanup()
+  assert.throws(() => statSync(old), /ENOENT/)
+  assert.equal(readFileSync(target, "utf8"), "data")
+  assert.equal(db.tasks().find((x) => x.message_id === 1)?.final_path, null)
+  await downloader.cleanup()
+  assert.equal(
+    db.sql.prepare("SELECT count(*) AS n FROM media_cleanup").get()!.n,
+    0
+  )
+})
+
+test("reclassification labels existing trailers and preserves the original inode across restart cleanup", async (t) => {
+  const { settings } = setup(t),
+    db = new Database(settings.database)
+  t.after(() => db.close())
+  db.configure(rules, new Map([[PRIMARY, ["吞噬星空"]]]), false)
+  const downloader = new Downloader(db, settings)
+  await downloader.prepare()
+  const oldTask = task(PRIMARY, 1, 101)
+  db.enqueue([oldTask])
+  const original = finalPath(settings.media, oldTask)
+  mkdirSync(join(original, ".."), { recursive: true })
+  writeFileSync(original, "data")
+  db.completed(oldTask, original)
+  const ino = statSync(original).ino
+  const preview = { ...oldTask, content_type: "trailer" as const }
+  await downloader.reclassify(preview)
+  assert.match(db.tasks()[0].final_path!, /trailers/)
+  assert.match(db.tasks()[0].final_path!, /预告/)
+  assert.equal(statSync(db.tasks()[0].final_path!).ino, ino)
+  assert.equal(db.tasks()[0].content_type, "trailer")
+  assert.throws(() => statSync(original), /ENOENT/)
+})
+
+test("pending move cleanup survives restart and refuses to delete an altered original", async (t) => {
+  const { settings } = setup(t),
+    db = new Database(settings.database)
+  t.after(() => db.close())
+  const downloader = new Downloader(db, settings)
+  await downloader.prepare()
+  const original = task(),
+    path = finalPath(settings.media, original)
+  db.enqueue([original])
+  mkdirSync(join(path, ".."), { recursive: true })
+  writeFileSync(path, "data")
+  db.completed(original, path)
+  t.mock.method(downloader, "cleanup", async () => {})
+  await downloader.reclassify({ ...original, season: 2 })
+  assert.equal(readFileSync(path, "utf8"), "data")
+  const row = db.sql.prepare("SELECT * FROM media_cleanup").get()!
+  const moved = db.tasks()[0].final_path!
+  assert.equal(statSync(path).ino, statSync(moved).ino)
+  rmSync(path)
+  writeFileSync(path, "more")
+  const restarted = new Downloader(db, settings)
+  await restarted.cleanup()
+  assert.equal(readFileSync(path, "utf8"), "more")
+  assert.match(
+    String(
+      db.sql.prepare("SELECT last_error FROM media_cleanup").get()!.last_error
+    ),
+    /身份/
+  )
+  assert.equal(readFileSync(moved, "utf8"), "data")
+  assert.equal(row.reason, "moved")
+})
+
 test("matching preserves Chinese episodes, Python patterns, season mapping, album titles and exclusions", () => {
   checkConfig(rules)
   assert.equal(parseNumber("一百五十八"), 158)
@@ -111,6 +210,15 @@ test("matching preserves Chinese episodes, Python patterns, season mapping, albu
     match(rules, PRIMARY, ["吞噬星空"], mediaMessage(1, "吞噬星空 第两百集"))
       ?.episode,
     200
+  )
+  assert.equal(
+    match(
+      rules,
+      PRIMARY,
+      ["吞噬星空"],
+      mediaMessage(1, "吞噬星空 第29（59）集")
+    )?.episode,
+    29
   )
   assert.equal(
     match(rules, PRIMARY, ["吞噬星空"], mediaMessage(1, "吞噬星空 S04E14"))
@@ -482,6 +590,123 @@ test("download validates source document identity and recovers an atomically pub
   assert.equal(db.refreshState().requested_generation, 2)
 })
 
+test("AI rescans correct completed season paths without downloading or changing bytes", async (t) => {
+  const { settings } = setup(t)
+  const db = new Database(settings.database)
+  t.after(() => db.close())
+  const config: Config = {
+    ...rules,
+    ai: { enabled: true, base_url: "https://ai.test/v1", model: "test" },
+  }
+  db.configure(config, new Map([[PRIMARY, ["吞噬星空"]]]), false)
+  const queue = new Downloader(db, settings)
+  await queue.prepare()
+  const original = task()
+  db.enqueue([original])
+  const oldPath = finalPath(settings.media, original)
+  mkdirSync(join(oldPath, ".."), { recursive: true })
+  writeFileSync(oldPath, "data")
+  const inode = statSync(oldPath).ino
+  db.completed(original, oldPath)
+  const generation = db.refreshState().requested_generation
+  t.mock.method(globalThis, "fetch", async () =>
+    Response.json({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              series_name: "吞噬星空",
+              season: 3,
+              episode: 5,
+            }),
+          },
+        },
+      ],
+    })
+  )
+  const source = new Source(
+    new FakeTransport(settings.session),
+    new Map([[PRIMARY, { id: PRIMARY }]]),
+    config,
+    db,
+    (candidate) => queue.reclassify(candidate)
+  )
+  const message = mediaMessage(1, "吞噬星空 第三季 第5集（累计157集）")
+  await source.ingest(PRIMARY, [message])
+  const corrected = db.tasks()[0]
+  assert.equal(corrected.status, "completed")
+  assert.equal(corrected.season, 3)
+  assert.equal(corrected.episode, 5)
+  assert.equal(
+    corrected.final_path,
+    finalPath(settings.media, { ...original, season: 3, episode: 5 })
+  )
+  assert.equal(readFileSync(corrected.final_path, "utf8"), "data")
+  assert.equal(statSync(corrected.final_path).ino, inode)
+  assert.throws(() => statSync(oldPath), { code: "ENOENT" })
+  assert.equal(db.refreshState().requested_generation, generation + 1)
+  await source.ingest(PRIMARY, [message])
+  assert.equal(db.refreshState().requested_generation, generation + 1)
+})
+
+test("season correction refuses conflicting targets and changed documents without losing originals", async (t) => {
+  const { settings } = setup(t)
+  const db = new Database(settings.database)
+  t.after(() => db.close())
+  const queue = new Downloader(db, settings)
+  await queue.prepare()
+  const original = task()
+  db.enqueue([original])
+  const oldPath = finalPath(settings.media, original)
+  mkdirSync(join(oldPath, ".."), { recursive: true })
+  writeFileSync(oldPath, "data")
+  db.completed(original, oldPath)
+  const corrected = { ...original, season: 2 }
+  const target = finalPath(settings.media, corrected)
+  mkdirSync(join(target, ".."), { recursive: true })
+  writeFileSync(target, "more")
+  await assert.rejects(queue.reclassify(corrected), /冲突/)
+  assert.equal(readFileSync(oldPath, "utf8"), "data")
+  assert.equal(readFileSync(target, "utf8"), "more")
+  assert.equal(db.tasks()[0].season, 1)
+  await queue.reclassify({ ...corrected, document_id: "123" })
+  assert.equal(db.tasks()[0].final_path, oldPath)
+  rmSync(join(target, ".."), { recursive: true })
+  const outside = join(settings.temp, "outside")
+  mkdirSync(outside)
+  await symlink(outside, join(target, ".."))
+  await assert.rejects(queue.reclassify(corrected), /越出/)
+  assert.equal(readFileSync(oldPath, "utf8"), "data")
+})
+
+test("season correction retries a linked target safely after database rollback", async (t) => {
+  const { settings } = setup(t)
+  const db = new Database(settings.database)
+  t.after(() => db.close())
+  const queue = new Downloader(db, settings)
+  await queue.prepare()
+  const original = task()
+  db.enqueue([original])
+  const oldPath = finalPath(settings.media, original)
+  mkdirSync(join(oldPath, ".."), { recursive: true })
+  writeFileSync(oldPath, "data")
+  db.completed(original, oldPath)
+  const corrected = { ...original, season: 2, episode: 3 }
+  const target = finalPath(settings.media, corrected)
+  db.sql.exec(
+    "CREATE TRIGGER reject_correction BEFORE UPDATE OF season ON downloads BEGIN SELECT RAISE(ABORT,'fixture failure'); END"
+  )
+  await assert.rejects(queue.reclassify(corrected), /fixture failure/)
+  assert.equal(readFileSync(oldPath, "utf8"), "data")
+  assert.equal(statSync(target).ino, statSync(oldPath).ino)
+  assert.equal(db.tasks()[0].final_path, oldPath)
+  db.sql.exec("DROP TRIGGER reject_correction")
+  await queue.reclassify(corrected)
+  assert.equal(db.tasks()[0].final_path, target)
+  assert.equal(readFileSync(target, "utf8"), "data")
+  assert.throws(() => statSync(oldPath), { code: "ENOENT" })
+})
+
 test("scan ingests full album context at a cursor boundary and ignores stale scan completion", async (t) => {
   const { settings } = setup(t),
     db = new Database(settings.database)
@@ -604,6 +829,120 @@ test("rescanning cancels rejected candidates and corrects old identities before 
   assert.equal(db.claim([PRIMARY]), undefined)
   await source.ingest(PRIMARY, [mediaMessage(1, "吞噬星空 第159集", 1)])
   assert.equal(db.claim([PRIMARY])!.message_id, 1)
+})
+
+test("trailers are excluded without custom keywords and cannot displace full episodes", async (t) => {
+  const { settings } = setup(t)
+  const db = new Database(settings.database)
+  t.after(() => db.close())
+  const config = {
+    ...rules,
+    series: [{ ...rules.series[0], exclude_keywords: [] }],
+  }
+  db.configure(config, new Map([[PRIMARY, ["吞噬星空"]]]), false)
+  db.checkpoint(PRIMARY, 0)
+  const source = new Source(
+    new FakeTransport(settings.session),
+    new Map([[PRIMARY, { id: PRIMARY }]]),
+    config,
+    db
+  )
+  await source.ingest(PRIMARY, [
+    mediaMessage(1, "吞噬星空 第159集"),
+    mediaMessage(2, "吞噬星空 第160集 预告"),
+  ])
+  db.finishScan(PRIMARY)
+  assert.equal(db.claim([PRIMARY])?.message_id, 1)
+  assert.equal(db.claim([PRIMARY]), undefined)
+  for (const marker of ["预告", "先导片", "花絮", "TRAILER", "teaser", "PV"]) {
+    assert.equal(
+      match(
+        config,
+        PRIMARY,
+        ["吞噬星空"],
+        mediaMessage(3, `吞噬星空 第160集 ${marker}`)
+      ),
+      null,
+      marker
+    )
+  }
+  assert.equal(
+    match(
+      config,
+      PRIMARY,
+      ["吞噬星空"],
+      mediaMessage(3, "吞噬星空 第159集"),
+      "预告"
+    ),
+    null
+  )
+})
+
+test("rescanning a completed trailer frees latest selection without deleting its file", async (t) => {
+  const { settings } = setup(t)
+  const db = new Database(settings.database)
+  t.after(() => db.close())
+  db.configure(rules, new Map([[PRIMARY, ["吞噬星空"]]]), false)
+  db.checkpoint(PRIMARY, 0)
+  const trailer = task(PRIMARY, 2, 160)
+  db.enqueue([task(PRIMARY, 1, 159), trailer])
+  db.completed(trailer, "/retained-trailer.mp4")
+  const source = new Source(
+    new FakeTransport(settings.session),
+    new Map([[PRIMARY, { id: PRIMARY }]]),
+    rules,
+    db
+  )
+  await source.ingest(PRIMARY, [
+    mediaMessage(1, "吞噬星空 第159集"),
+    mediaMessage(2, "吞噬星空 第160集 预告"),
+  ])
+  db.finishScan(PRIMARY)
+  assert.equal(db.claim([PRIMARY])?.message_id, 1)
+  const retained = db.tasks().find((item) => item.message_id === 2)!
+  assert.equal(retained.status, "completed")
+  assert.equal(retained.final_path, "/retained-trailer.mp4")
+  assert.equal(db.claim([PRIMARY]), undefined)
+  await source.ingest(PRIMARY, [mediaMessage(2, "吞噬星空 第160集")])
+  assert.equal(
+    db.sql.prepare("SELECT matched FROM downloads WHERE message_id=2").get()!
+      .matched,
+    1
+  )
+  assert.equal(
+    db.tasks().find((item) => item.message_id === 2)!.status,
+    "completed"
+  )
+})
+
+test("uncertain rescans preserve completed episode selection until explicitly excluded", async (t) => {
+  const { settings } = setup(t)
+  const db = new Database(settings.database)
+  t.after(() => db.close())
+  db.configure(rules, new Map([[PRIMARY, ["吞噬星空"]]]), false)
+  db.checkpoint(PRIMARY, 0)
+  db.enqueue([task(PRIMARY, 1, 159), task(PRIMARY, 2, 158)])
+  db.completed(task(), "/retained-episode.mp4")
+  const source = new Source(
+    new FakeTransport(settings.session),
+    new Map([[PRIMARY, { id: PRIMARY }]]),
+    rules,
+    db
+  )
+  await source.ingest(PRIMARY, [mediaMessage(1, "吞噬星空 正片")])
+  db.finishScan(PRIMARY)
+  assert.equal(db.claim([PRIMARY]), undefined)
+  assert.equal(
+    db.sql.prepare("SELECT matched FROM downloads WHERE message_id=1").get()!
+      .matched,
+    1
+  )
+  await source.ingest(PRIMARY, [mediaMessage(1, "吞噬星空 预告")])
+  assert.equal(db.claim([PRIMARY])?.message_id, 2)
+  assert.equal(
+    db.tasks().find((item) => item.message_id === 1)!.status,
+    "completed"
+  )
 })
 
 test("rescanning preserves completed and active downloads", async (t) => {
@@ -803,6 +1142,51 @@ test("changing Emby connection clears old retry delay and keeps an old refresh a
   )
 })
 
+test("manually enqueues the configured Telegram post and preserves the confirmed episode on rescan", async (t) => {
+  const { settings } = setup(t)
+  const runtime = new ManagementRuntime(settings, fakeFactory)
+  t.after(() => runtime.close())
+  await runtime.downloader.prepare()
+  runtime.restoring = false
+  const client = new FakeTransport(settings.session)
+  client.loggedIn = true
+  client.userId = 2
+  client.phone = "+15550123456"
+  await client.connect()
+  await runtime.accounts.saveAccount("a", "测试账号", client, settings.session)
+  runtime.accounts.clients.set("a", client)
+  runtime.raw = {
+    ...rules,
+    channels: [{ url: "https://t.me/fixtureprimary", account_id: "a" }],
+  }
+  await runtime.rebuild()
+  runtime.db.finishScan(PRIMARY)
+  const input = {
+    action: "enqueue" as const,
+    link: "https://t.me/fixtureprimary/1",
+    series: "吞噬星空",
+    season: 1,
+    episode: 158,
+  }
+  await assert.rejects(
+    runtime.write({
+      ...input,
+      link: "https://t.me.evil.test/fixtureprimary/1",
+    }),
+    /单条消息链接/
+  )
+  await assert.rejects(
+    runtime.write({ ...input, link: "https://t.me/fixtureprimary/2" }),
+    /符合该作品规则的视频/
+  )
+  await runtime.write(input)
+  await runtime.sources.get("a")!.scan(PRIMARY)
+  const [row] = runtime.db.tasks()
+  assert.equal(row.status, "pending")
+  assert.equal(row.episode, 158)
+  assert.equal(row.identification_reason, "人工确认季集")
+})
+
 test("manual backfill leaves normal cursor intact and requires a subsequent selection scan", async (t) => {
   const { settings } = setup(t),
     runtime = new ManagementRuntime(settings, fakeFactory)
@@ -925,11 +1309,31 @@ test("keyword filtering skips unrelated and excluded videos without blocking sca
     config,
     db
   )
-  const provider = t.mock.method(globalThis, "fetch", async () => {
-    throw new Error("provider should not run")
-  })
+  const provider = t.mock.method(
+    globalThis,
+    "fetch",
+    async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const input = JSON.parse(
+        JSON.parse(String(init?.body)).messages[1].content
+      )
+      assert.equal(input.text, "吞噬星空 第159集")
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                series_name: "吞噬星空",
+                season: 2,
+                episode: 159,
+              }),
+            },
+          },
+        ],
+      })
+    }
+  )
   assert.equal((await source.scan(PRIMARY)).completed, true)
-  assert.equal(provider.mock.callCount(), 0)
+  assert.equal(provider.mock.callCount(), 1)
   assert.equal(db.getCheckpoint(PRIMARY)!.last_scanned_message_id, 3)
   assert.equal(db.getCheckpoint(PRIMARY)!.first_scan_complete, 1)
   assert.equal(db.tasks().length, 1)
@@ -983,8 +1387,35 @@ test("invalid AI output cannot hold all channels or block later keyword tasks", 
           config,
           db
         )
-        const provider = t.mock.method(globalThis, "fetch", async () =>
-          Response.json({ choices: [{ message: { content } }] })
+        const provider = t.mock.method(
+          globalThis,
+          "fetch",
+          async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+            const input = JSON.parse(
+              JSON.parse(String(init?.body)).messages[1].content
+            )
+            const episode = input.text.includes("第159集")
+              ? 159
+              : input.text.includes("第158集")
+                ? 158
+                : null
+            return Response.json({
+              choices: [
+                {
+                  message: {
+                    content:
+                      episode === null
+                        ? content
+                        : JSON.stringify({
+                            series_name: "吞噬星空",
+                            season: 2,
+                            episode,
+                          }),
+                  },
+                },
+              ],
+            })
+          }
         )
         const warnings = t.mock.method(console, "warn", () => {})
         assert.equal((await source.scan(PRIMARY)).completed, true)
@@ -993,7 +1424,7 @@ test("invalid AI output cannot hold all channels or block later keyword tasks", 
         assert.equal((await source.scan(SECONDARY)).completed, true)
         assert.equal(db.selectionReady(), true)
         assert.equal(source.lastError, null)
-        assert.equal(provider.mock.callCount(), 1)
+        assert.equal(provider.mock.callCount(), content.startsWith("{") ? 4 : 3)
         assert.equal(warnings.mock.callCount(), 1)
         assert.equal(
           JSON.stringify(warnings.mock.calls).includes("private"),
@@ -1009,7 +1440,7 @@ test("invalid AI output cannot hold all channels or block later keyword tasks", 
   }
 })
 
-test("invalid AI output preserves a valid local rule result", async (t) => {
+test("invalid AI output never publishes a local default season", async (t) => {
   const { settings } = setup(t)
   const db = new Database(settings.database)
   t.after(() => db.close())
@@ -1033,9 +1464,8 @@ test("invalid AI output preserves a valid local rule result", async (t) => {
   )
   t.mock.method(console, "warn", () => {})
   assert.equal((await source.scan(PRIMARY)).completed, true)
-  assert.equal(db.tasks()[0].series_name, "吞噬星空")
-  assert.equal(db.tasks()[0].episode, null)
-  assert.equal(db.tasks()[0].status, "pending")
+  assert.equal(db.tasks().length, 0)
+  assert.equal(db.getCheckpoint(PRIMARY)!.last_scanned_message_id, 1)
 })
 
 test("AI failure keeps history cursor for retry and exposes a safe scan error", async (t) => {

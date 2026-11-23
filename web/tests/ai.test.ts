@@ -30,6 +30,104 @@ const answer =
       choices: [{ message: { content: JSON.stringify(result) } }],
     })
 
+test("verified absolute mapping permits AI to correct placeholder S01 and convert 248 to S05E40", async () => {
+  const configured: Config = {
+    ...config,
+    series: [
+      {
+        name: names[0],
+        latest_episodes: 3,
+        episode_mappings: [
+          {
+            absolute_start: 209,
+            absolute_end: 260,
+            season: 5,
+            episode_start: 1,
+            source: "https://fixture.invalid/season5",
+          },
+        ],
+      },
+    ],
+  }
+  const message = {
+    ...mediaMessage(1, "吞噬星空 第248集"),
+    document: {
+      ...mediaMessage(1, "").document!,
+      filename: "吞噬星空.S01E248.mp4",
+    },
+  }
+  const candidate = await identifyMedia(
+    configured,
+    PRIMARY,
+    names,
+    message,
+    "",
+    answer({
+      series_name: names[0],
+      season: 5,
+      episode: 40,
+      absolute_episode: 248,
+      content_type: "episode",
+    })
+  )
+  assert.equal(candidate?.season, 5)
+  assert.equal(candidate.episode, 40)
+  assert.equal(candidate.absolute_episode, 248)
+  await assert.rejects(
+    identifyMedia(
+      configured,
+      PRIMARY,
+      names,
+      message,
+      "",
+      answer({ series_name: names[0], season: 1, episode: 248 })
+    ),
+    /映射/
+  )
+})
+
+test("a sibling trailer cannot exclude or classify the main episode", async () => {
+  const candidate = await identifyMedia(
+    config,
+    PRIMARY,
+    names,
+    mediaMessage(1, "吞噬星空 第100集"),
+    "吞噬星空 第100集 吞噬星空 第101集预告",
+    answer({
+      series_name: names[0],
+      season: 1,
+      episode: 100,
+      content_type: "episode",
+    })
+  )
+  assert.equal(candidate?.content_type, "episode")
+})
+
+test("small file size is a hint and does not turn a short main episode into a trailer", async () => {
+  const candidate = await identifyMedia(
+    config,
+    PRIMARY,
+    names,
+    {
+      ...mediaMessage(1, "吞噬星空 第100集"),
+      document: {
+        ...mediaMessage(1, "").document!,
+        size: 7000000,
+        duration: 360,
+      },
+    },
+    "",
+    answer({
+      series_name: names[0],
+      season: 1,
+      episode: 100,
+      content_type: "episode",
+      reason: "短篇正片，有完整剧情",
+    })
+  )
+  assert.equal(candidate?.content_type, "episode")
+})
+
 test("AI supplements episodes only for keyword-matched works using metadata", async () => {
   const message = mediaMessage(1, "Swallowed Star EP159")
   const candidate = await identifyMedia(
@@ -68,12 +166,213 @@ test("AI supplements episodes only for keyword-matched works using metadata", as
   assert.ok(finalPath("/media", candidate).startsWith("/media/TV/"))
 })
 
-test("known episodes and disabled AI never call the provider", async () => {
+test("AI decides season and episode even when local rules already match", async () => {
+  const configured: Config = {
+    ...config,
+    series: [
+      {
+        ...config.series[0],
+        default_season: 1,
+        season_aliases: { 年番: 2 },
+        episode_patterns: ["S(?P<season>\\d+)E(?P<episode>\\d+)"],
+      },
+    ],
+  }
+  let calls = 0
+  const candidate = await identifyMedia(
+    configured,
+    PRIMARY,
+    names,
+    {
+      ...mediaMessage(1, "吞噬星空 年番 第2季 S02E159"),
+      document: {
+        ...mediaMessage(1, "").document!,
+        filename: "Swallowed.Star.S03E05.mp4",
+      },
+    },
+    "吞噬星空 第三季",
+    async (url, init) => {
+      calls++
+      const input = JSON.parse(
+        JSON.parse(String(init?.body)).messages[1].content
+      )
+      assert.deepEqual(input.works[0].season_aliases, { 年番: 2 })
+      assert.equal(input.works[0].default_season, 1)
+      return answer({ series_name: names[0], season: 3, episode: 5 })(url, init)
+    }
+  )
+  assert.equal(calls, 1)
+  assert.equal(candidate?.season, 3)
+  assert.equal(candidate.episode, 5)
+})
+
+test("AI rechecks a season that conflicts with the filename and rejects persistent conflicts", async () => {
+  const message = {
+    ...mediaMessage(1, "吞噬星空 第15集"),
+    document: {
+      ...mediaMessage(1, "").document!,
+      filename: "Swallowed.Star.S04E15.mp4",
+    },
+  }
+  let calls = 0
+  const candidate = await identifyMedia(
+    config,
+    PRIMARY,
+    names,
+    message,
+    "",
+    async (url, init) => {
+      calls++
+      const input = JSON.parse(
+        JSON.parse(String(init?.body)).messages[1].content
+      )
+      assert.equal(input.filename_season, 4)
+      if (calls === 2) assert.ok(input.validation_feedback)
+      return answer({
+        series_name: names[0],
+        season: calls === 1 ? 2 : 4,
+        episode: 15,
+      })(url, init)
+    }
+  )
+  assert.equal(calls, 2)
+  assert.equal(candidate?.season, 4)
+  let rejectedCalls = 0
+  await assert.rejects(
+    identifyMedia(config, PRIMARY, names, message, "", async (url, init) => {
+      rejectedCalls++
+      return answer({ series_name: names[0], season: 2, episode: 15 })(
+        url,
+        init
+      )
+    }),
+    /分季证据/
+  )
+  assert.equal(rejectedCalls, 2)
+})
+
+test("AI uses a consistent configured season alias when filename lacks a season", async () => {
+  const configured: Config = {
+    ...config,
+    series: [{ ...config.series[0], season_aliases: { 完结季: 4 } }],
+  }
+  const candidate = await identifyMedia(
+    configured,
+    PRIMARY,
+    names,
+    mediaMessage(1, "吞噬星空 完结季 第18集"),
+    "",
+    answer({ series_name: names[0], season: 4, episode: 18 })
+  )
+  assert.equal(candidate?.season, 4)
+  await assert.rejects(
+    identifyMedia(
+      configured,
+      PRIMARY,
+      names,
+      mediaMessage(1, "吞噬星空 完结季 第18集"),
+      "",
+      answer({ series_name: names[0], season: 2, episode: 18 })
+    ),
+    /分季证据/
+  )
+})
+
+test("AI must agree with an explicit Chinese season in the caption", async () => {
+  const message = mediaMessage(1, "吞噬星空 第三季 第18集")
+  await assert.rejects(
+    identifyMedia(
+      config,
+      PRIMARY,
+      names,
+      message,
+      "",
+      answer({ series_name: names[0], season: 2, episode: 18 })
+    ),
+    /分季证据/
+  )
+  const candidate = await identifyMedia(
+    config,
+    PRIMARY,
+    names,
+    message,
+    "",
+    answer({ series_name: names[0], season: 3, episode: 18 })
+  )
+  assert.equal(candidate?.season, 3)
+  const conflictingFilename = {
+    ...message,
+    document: { ...message.document!, filename: "Swallowed.Star.S01E101.mp4" },
+  }
+  const reconciled = await identifyMedia(
+    config,
+    PRIMARY,
+    names,
+    conflictingFilename,
+    "",
+    answer({ series_name: names[0], season: 3, episode: 18 })
+  )
+  assert.equal(reconciled?.season, 3)
+  await assert.rejects(
+    identifyMedia(
+      config,
+      PRIMARY,
+      names,
+      conflictingFilename,
+      "",
+      answer({ series_name: names[0], season: 2, episode: 18 })
+    ),
+    /分季证据/
+  )
+})
+
+test("AI cannot invent an episode conversion without source evidence", async () => {
+  let calls = 0
+  const candidate = await identifyMedia(
+    config,
+    PRIMARY,
+    names,
+    mediaMessage(1, "吞噬星空 第三季 第94集"),
+    "",
+    async (url, init) => {
+      calls++
+      return answer({
+        series_name: names[0],
+        season: 3,
+        episode: calls === 1 ? 16 : 94,
+      })(url, init)
+    }
+  )
+  assert.equal(calls, 2)
+  assert.equal(candidate?.episode, 94)
+})
+
+test("AI rejection or uncertainty never falls back to known local episodes", async () => {
+  for (const result of [
+    { series_name: null },
+    { series_name: names[0], season: null, episode: 159 },
+    { series_name: names[0], season: 2, episode: null },
+  ]) {
+    assert.equal(
+      await identifyMedia(
+        config,
+        PRIMARY,
+        names,
+        mediaMessage(1, "吞噬星空 第159集"),
+        "",
+        answer(result)
+      ),
+      null
+    )
+  }
+})
+
+test("disabled AI and non-media never call the provider", async () => {
   const unused: typeof fetch = async () => {
     throw new Error("provider should not run")
   }
   const known = await identifyMedia(
-    config,
+    { ...config, ai: { ...config.ai!, enabled: false } },
     PRIMARY,
     names,
     mediaMessage(1, "吞噬星空 第159集"),
@@ -101,6 +400,33 @@ test("known episodes and disabled AI never call the provider", async () => {
     ),
     null
   )
+})
+
+test("trailers are explicitly classified without occupying main episode identity", async () => {
+  const noCustomExclusions = {
+    ...config,
+    series: [{ ...config.series[0], exclude_keywords: undefined }],
+  }
+  for (const text of ["吞噬星空 第160集 预告", "吞噬星空 teaser"]) {
+    assert.equal(
+      (
+        await identifyMedia(
+          noCustomExclusions,
+          PRIMARY,
+          names,
+          mediaMessage(1, text),
+          "",
+          answer({
+            series_name: names[0],
+            season: 1,
+            episode: 160,
+            content_type: "episode",
+          })
+        )
+      )?.content_type,
+      "trailer"
+    )
+  }
 })
 
 test("AI cannot bypass exclusions, fixed seasons, limits or configured titles", async () => {
@@ -272,6 +598,37 @@ test("AI can disambiguate multiple keyword hits and use album keywords", async (
     assert.equal(candidate?.series_name, names[0])
     assert.equal(candidate.episode, 159)
   }
+})
+
+test("AI retries an out-of-range response once with corrective feedback", async () => {
+  let calls = 0
+  const candidate = await identifyMedia(
+    config,
+    PRIMARY,
+    names,
+    mediaMessage(1, "吞噬星空 第48集"),
+    "",
+    async (url, init) => {
+      calls++
+      const input = JSON.parse(
+        JSON.parse(String(init?.body)).messages[1].content
+      )
+      if (calls === 2)
+        assert.match(input.validation_feedback, /episode_evidence/)
+      return answer(
+        calls === 1
+          ? { series_name: names[0], season: 1, episode: 10000 }
+          : {
+              series_name: names[0],
+              season: 1,
+              episode: 48,
+              content_type: "episode",
+            }
+      )(url, init)
+    }
+  )
+  assert.equal(calls, 2)
+  assert.equal(candidate?.episode, 48)
 })
 
 test("provider failures and malformed model responses expose only safe errors", async () => {

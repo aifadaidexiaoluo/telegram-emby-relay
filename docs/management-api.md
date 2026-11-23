@@ -20,6 +20,7 @@
 | config | version, config | 原子备份与保存、重建扫描、取消不允许任务 |
 | scan | since, until, channel? | 补扫已配置频道，时间必须含时区，结束不包含 |
 | retry | channel, message | 重新入队失败任务，继续遵守最新集数和白名单 |
+| enqueue | link, series, season, episode | 读取已配置公开频道的单条 `https://t.me/<channel>/<message>` 消息，按人工确认的季集提交下载候选，继续遵守作品规则和最新集数限制 |
 
 Config 原字段保持不变，新增 `emby_base_url?: string` 和写入专用 `emby_api_key?: string`。地址允许 HTTP(S)，禁止用户名／密码、查询参数和 fragment，刷新路径为 `/Library/Refresh`。Key 必须非空且不含换行；省略 Key 保留已配置值。环境变量提供默认值，页面保存的值优先。
 

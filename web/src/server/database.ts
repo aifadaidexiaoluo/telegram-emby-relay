@@ -3,10 +3,11 @@ import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { now } from "./config.ts"
 import type { Candidate } from "./config.ts"
-import type { Config } from "../lib/types.ts"
+import type { Config, Series } from "../lib/types.ts"
 
+export const MANUAL_EPISODE = "人工确认季集"
 export const DOWNLOAD_COLUMNS =
-  "channel_id,message_id,series_name,CAST(document_id AS TEXT) AS document_id,expected_size,season,episode,extension,status,attempts,next_retry_at,final_path,last_error,created_at,updated_at,published_at"
+  "channel_id,message_id,series_name,CAST(document_id AS TEXT) AS document_id,expected_size,season,episode,extension,status,attempts,next_retry_at,final_path,last_error,created_at,updated_at,published_at,content_type,absolute_episode,identification_reason"
 export type Download = Candidate & {
   status: string
   attempts: number
@@ -45,6 +46,7 @@ export class Database {
   limits = new Map<string, number>()
   channels = new Map<number, string[]>()
   categories = new Map<string, string>()
+  series = new Map<string, Series>()
   blocked = true
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
@@ -70,8 +72,23 @@ export class Database {
       CREATE TABLE IF NOT EXISTS telegram_accounts (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL UNIQUE,
         name TEXT NOT NULL, username TEXT, phone TEXT NOT NULL, session_path TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS telegram_channel_ids (reference TEXT PRIMARY KEY, channel_id INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS media_cleanup (
+        path TEXT PRIMARY KEY, expected_size INTEGER NOT NULL, device TEXT NOT NULL, inode TEXT NOT NULL,
+        channel_id INTEGER NOT NULL, message_id INTEGER NOT NULL, reason TEXT NOT NULL,
+        replacement_channel INTEGER, replacement_message INTEGER, last_error TEXT, created_at REAL NOT NULL);
+      CREATE TABLE IF NOT EXISTS media_identifications (
+        channel_id INTEGER NOT NULL,message_id INTEGER NOT NULL,document_id TEXT NOT NULL,
+        source_metadata TEXT NOT NULL,decision TEXT NOT NULL,reason TEXT,updated_at REAL NOT NULL,
+        PRIMARY KEY(channel_id,message_id));
     `)
     for (const [table, name, definition] of [
+      [
+        "downloads",
+        "content_type",
+        "TEXT NOT NULL DEFAULT 'episode' CHECK(content_type IN ('episode','trailer','extra','unknown'))",
+      ],
+      ["downloads", "absolute_episode", "INTEGER"],
+      ["downloads", "identification_reason", "TEXT"],
       ["downloads", "published_at", "REAL NOT NULL DEFAULT 0"],
       [
         "downloads",
@@ -128,6 +145,7 @@ export class Database {
       .get(channel) as Checkpoint | undefined
   }
   configure(config: Config, channels: Map<number, string[]>, blocked: boolean) {
+    this.series = new Map(config.series.map((rule) => [rule.name, rule]))
     this.categories = new Map(
       config.series.map((rule) => [rule.name, rule.category ?? "TV"])
     )
@@ -168,7 +186,7 @@ export class Database {
       if (ready && channels.length) {
         const rows = this.sql
           .prepare(
-            `SELECT channel_id,message_id,season,episode FROM downloads WHERE series_name=? AND episode IS NOT NULL AND matched=1
+            `SELECT channel_id,message_id,season,episode FROM downloads WHERE series_name=? AND episode IS NOT NULL AND matched=1 AND content_type='episode'
           AND channel_id IN (SELECT value FROM json_each(?)) ORDER BY season DESC,episode DESC,
           CASE status WHEN 'completed' THEN 0 WHEN 'downloading' THEN 1 WHEN 'pending' THEN 2 WHEN 'retry_wait' THEN 3 WHEN 'cancelled' THEN 4 ELSE 5 END,
           published_at DESC,channel_id,message_id DESC`
@@ -226,20 +244,45 @@ export class Database {
     tasks: Candidate[],
     channel?: number,
     cursor?: number,
-    rejected: number[] = []
+    rejected: number[] = [],
+    excluded: number[] = rejected
   ) {
     return this.transaction(() => {
       if (rejected.length) {
         if (channel === undefined) throw new Error("撤销候选必须指定频道")
         this.sql
           .prepare(
-            `UPDATE downloads SET matched=0,status='cancelled',last_error='不符合当前关键词或排除规则',updated_at=?
-          WHERE channel_id=? AND message_id IN (SELECT value FROM json_each(?)) AND status NOT IN ('completed','downloading')`
+            `UPDATE downloads SET matched=0,
+          status=CASE WHEN status IN ('completed','downloading') THEN status ELSE 'cancelled' END,
+          last_error=CASE WHEN status IN ('completed','downloading') THEN last_error ELSE '不符合当前关键词或排除规则' END,updated_at=?
+          WHERE channel_id=? AND message_id IN (SELECT value FROM json_each(?))
+          AND ((status NOT IN ('completed','downloading') AND identification_reason IS NOT ?)
+            OR message_id IN (SELECT value FROM json_each(?)))`
           )
-          .run(now(), channel, JSON.stringify(rejected))
+          .run(
+            now(),
+            channel,
+            JSON.stringify(rejected),
+            MANUAL_EPISODE,
+            JSON.stringify(excluded)
+          )
       }
       let count = 0
       for (const t of tasks) {
+        if (
+          t.identification_reason !== MANUAL_EPISODE &&
+          this.sql
+            .prepare(
+              "SELECT 1 FROM downloads WHERE channel_id=? AND message_id=? AND document_id=? AND identification_reason=? AND matched=1"
+            )
+            .get(
+              t.channel_id,
+              t.message_id,
+              BigInt(t.document_id),
+              MANUAL_EPISODE
+            )
+        )
+          continue
         count += Number(
           this.sql
             .prepare(
@@ -260,11 +303,32 @@ export class Database {
               t.episode,
               t.extension,
               t.published_at,
-              this.limits.has(t.series_name) ? "cancelled" : "pending",
+              this.limits.has(t.series_name) ||
+                (t.content_type && t.content_type !== "episode")
+                ? "cancelled"
+                : "pending",
               now(),
               now()
             ).changes
         )
+        this.sql
+          .prepare(
+            "UPDATE downloads SET content_type=?,absolute_episode=?,identification_reason=? WHERE channel_id=? AND message_id=? AND document_id=? AND series_name=?"
+          )
+          .run(
+            t.content_type ?? "episode",
+            t.absolute_episode ?? null,
+            t.identification_reason ?? null,
+            t.channel_id,
+            t.message_id,
+            BigInt(t.document_id),
+            t.series_name
+          )
+        this.sql
+          .prepare(
+            "UPDATE downloads SET status='cancelled',last_error='预告或花絮不占用正片集数' WHERE channel_id=? AND message_id=? AND content_type!='episode' AND status NOT IN ('completed','downloading')"
+          )
+          .run(t.channel_id, t.message_id)
         this.sql
           .prepare(
             `UPDATE downloads SET season=?,episode=?,extension=?,expected_size=?,published_at=?,updated_at=? WHERE channel_id=? AND message_id=? AND document_id=? AND series_name=? AND status NOT IN ('completed','downloading')`
@@ -281,7 +345,15 @@ export class Database {
             BigInt(t.document_id),
             t.series_name
           )
-        if (!this.limits.has(t.series_name))
+        this.sql
+          .prepare(
+            "UPDATE downloads SET matched=1 WHERE channel_id=? AND message_id=? AND document_id=? AND series_name=? AND matched=0"
+          )
+          .run(t.channel_id, t.message_id, BigInt(t.document_id), t.series_name)
+        if (
+          !this.limits.has(t.series_name) &&
+          (!t.content_type || t.content_type === "episode")
+        )
           this.sql
             .prepare(
               "UPDATE downloads SET status='pending',attempts=0,next_retry_at=0,last_error=NULL WHERE channel_id=? AND message_id=? AND document_id=? AND series_name=? AND status='cancelled'"
@@ -299,7 +371,7 @@ export class Database {
             "UPDATE channel_checkpoints SET last_scanned_message_id=MAX(last_scanned_message_id,?),last_success_at=? WHERE channel_id=?"
           )
           .run(cursor, now(), channel!)
-      if (tasks.length) this.selectLatest()
+      if (tasks.length || rejected.length) this.selectLatest()
       return count
     })
   }
@@ -309,7 +381,7 @@ export class Database {
       this.selectLatest()
       const task = this.sql
         .prepare(
-          `SELECT ${DOWNLOAD_COLUMNS} FROM downloads WHERE matched=1 AND status IN ('pending','retry_wait') AND next_retry_at<=?
+          `SELECT ${DOWNLOAD_COLUMNS} FROM downloads WHERE matched=1 AND content_type='episode' AND status IN ('pending','retry_wait') AND next_retry_at<=?
         AND channel_id IN (SELECT value FROM json_each(?)) ORDER BY created_at,channel_id,message_id LIMIT 1`
         )
         .get(now(), JSON.stringify(channels)) as Download | undefined

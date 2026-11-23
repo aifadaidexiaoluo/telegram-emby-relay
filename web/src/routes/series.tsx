@@ -21,6 +21,9 @@ function SeriesPage() {
     [remove, setRemove] = useState<number | null>(null)
   const [name, setName] = useState(""),
     [category, setCategory] = useState(""),
+    [mediaType, setMediaType] = useState(""),
+    [locations, setLocations] = useState(""),
+    [genres, setGenres] = useState(""),
     [limit, setLimit] = useState(""),
     [aliases, setAliases] = useState(""),
     [excludes, setExcludes] = useState(""),
@@ -41,10 +44,16 @@ function SeriesPage() {
       "aliases",
       "exclude_keywords",
       "latest_episodes",
+      "media_type",
+      "production_locations",
+      "genres",
     ])
       delete json[key]
     setName(rule?.name ?? "")
     setCategory(rule?.category ?? "")
+    setMediaType(rule?.media_type ?? "")
+    setLocations(rule?.production_locations?.join("、") ?? "")
+    setGenres(rule?.genres?.join("、") ?? "")
     setLimit(
       rule?.latest_episodes === undefined ? "" : String(rule.latest_episodes)
     )
@@ -71,6 +80,19 @@ function SeriesPage() {
         ...json,
         name: name.trim(),
         category: category || undefined,
+        media_type: (mediaType || undefined) as Series["media_type"],
+        production_locations: locations.trim()
+          ? locations
+              .split(/[、,，]/)
+              .map((v) => v.trim())
+              .filter(Boolean)
+          : undefined,
+        genres: genres.trim()
+          ? genres
+              .split(/[、,，]/)
+              .map((v) => v.trim())
+              .filter(Boolean)
+          : undefined,
         aliases: aliases.trim() ? list(aliases) : [name.trim()],
         exclude_keywords: list(excludes),
         latest_episodes: limit === "" ? undefined : Number(limit),
@@ -134,6 +156,22 @@ function SeriesPage() {
                 : "按规则识别季集"}
             </p>
             <p className="muted">文件分类：{rule.category ?? "TV（默认）"}</p>
+            <p className="muted">
+              作品类型：
+              {rule.media_type === "animation"
+                ? "动漫"
+                : rule.media_type === "series"
+                  ? "电视剧"
+                  : rule.media_type === "movie"
+                    ? "电影"
+                    : "待核实"}{" "}
+              · 制作地区：{rule.production_locations?.join("、") || "待核实"}
+            </p>
+            {!!rule.episode_mappings?.length && (
+              <p className="muted">
+                已配置 {rule.episode_mappings.length} 段累计集号与分季映射
+              </p>
+            )}
             <div className="chips">
               {rule.aliases?.map((alias, i) => (
                 <span key={i}>{alias}</span>
@@ -182,7 +220,8 @@ function SeriesPage() {
             {editing === -1 ? "添加作品" : "编辑作品规则"}
           </DialogTitle>
           <DialogDescription>
-            保存并应用后自动在全部频道中搜索。分类决定新下载文件的目录，已完成文件保留原位。
+            保存并应用后自动在全部频道中搜索；AI
+            重扫会按确认的季集与分类修正已有文件目录。
           </DialogDescription>
           <form className="form-stack" onSubmit={save}>
             <div className="form-grid">
@@ -225,6 +264,38 @@ function SeriesPage() {
               </Field>
             </div>
             <div className="form-grid">
+              <Field label="作品类型">
+                <SelectInput
+                  value={mediaType}
+                  onValueChange={setMediaType}
+                  options={[
+                    { value: "", label: "待核实" },
+                    { value: "animation", label: "动漫" },
+                    { value: "series", label: "电视剧" },
+                    { value: "movie", label: "电影" },
+                  ]}
+                />
+              </Field>
+              <Field
+                label="制作地区"
+                help="多个地区以顿号分隔，如：中国大陆。依据制作产地填写。"
+              >
+                <Input
+                  value={locations}
+                  onChange={(e) => setLocations(e.target.value)}
+                />
+              </Field>
+              <Field
+                label="题材"
+                help="多个题材以顿号分隔，如：动画、科幻、冒险。"
+              >
+                <Input
+                  value={genres}
+                  onChange={(e) => setGenres(e.target.value)}
+                />
+              </Field>
+            </div>
+            <div className="form-grid">
               <Field label="作品别名（每行一个）">
                 <Textarea
                   value={aliases}
@@ -242,7 +313,7 @@ function SeriesPage() {
               <summary>高级规则 · JSON</summary>
               <Field
                 label="高级规则对象"
-                help="支持 default_season、fixed_season、season_aliases、episode_patterns；保留现有扩展字段。"
+                help="支持 episode_mappings（累计范围、季号、季内起始集及来源）、metadata_sources（资料网址）、default_season、fixed_season、season_aliases、episode_patterns。"
               >
                 <Textarea
                   className="code-input"

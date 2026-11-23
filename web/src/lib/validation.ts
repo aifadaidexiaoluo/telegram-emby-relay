@@ -119,6 +119,37 @@ export function validateConfig(value: unknown): asserts value is Config {
       if (rule[key] !== undefined) integer(rule[key], 0, 99)
     if (rule.latest_episodes !== undefined)
       integer(rule.latest_episodes, 1, 1000)
+    if (rule.media_type !== undefined)
+      requireValue(
+        ["animation", "series", "movie"].includes(String(rule.media_type)),
+        "作品类型无效"
+      )
+    for (const key of ["production_locations", "genres", "metadata_sources"]) {
+      if (rule[key] !== undefined) {
+        strings(rule[key])
+        requireValue(
+          (rule[key] as string[]).every((v) => !!v.trim()),
+          "作品资料不能包含空字符串"
+        )
+      }
+    }
+    if (rule.episode_mappings !== undefined) {
+      requireValue(Array.isArray(rule.episode_mappings), "分季映射必须是列表")
+      let end = 0
+      for (const mapping of rule.episode_mappings) {
+        object(mapping)
+        integer(mapping.absolute_start, end + 1, 9999)
+        integer(mapping.absolute_end, Number(mapping.absolute_start), 9999)
+        integer(mapping.season, 0, 99)
+        integer(
+          mapping.episode_start,
+          1,
+          9999 - Number(mapping.absolute_end) + Number(mapping.absolute_start)
+        )
+        text(mapping.source, 2000)
+        end = Number(mapping.absolute_end)
+      }
+    }
     for (const key of ["aliases", "exclude_keywords", "episode_patterns"]) {
       if (Array.isArray(rule[key]))
         requireValue(
@@ -187,6 +218,17 @@ export function validateFilters(value: unknown): Filters {
     )
   return value as Filters
 }
+export function telegramPost(link: string) {
+  const parts = /^https:\/\/t\.me\/([a-z][a-z0-9_]{3,31})\/([1-9]\d*)$/i.exec(
+    link
+  )
+  requireValue(
+    parts && Number(parts[2]) <= 2147483647,
+    "请输入 Telegram 公开频道的单条消息链接"
+  )
+  return { reference: `@${parts[1].toLowerCase()}`, message: Number(parts[2]) }
+}
+
 export function validateWrite(value: unknown): Write {
   object(value)
   requireValue(
@@ -216,6 +258,13 @@ export function validateWrite(value: unknown): Write {
     case "cancel":
     case "logout":
       text(value.id)
+      break
+    case "enqueue":
+      text(value.link, 100)
+      telegramPost(value.link)
+      text(value.series, 200)
+      integer(value.season, 0, 99)
+      integer(value.episode, 1, 9999)
       break
     case "retry":
       integer(value.channel, Number.MIN_SAFE_INTEGER)

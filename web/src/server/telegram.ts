@@ -91,6 +91,9 @@ function message(value: Api.Message): MediaMessage {
   const filename = document?.attributes.find(
     (a) => a instanceof Api.DocumentAttributeFilename
   )
+  const video = document?.attributes.find(
+    (a) => a instanceof Api.DocumentAttributeVideo
+  )
   return {
     id: value.id,
     text: value.message || "",
@@ -108,6 +111,10 @@ function message(value: Api.Message): MediaMessage {
           video: document.attributes.some(
             (a) => a instanceof Api.DocumentAttributeVideo
           ),
+          duration:
+            video instanceof Api.DocumentAttributeVideo
+              ? video.duration
+              : undefined,
         }
       : undefined,
   }

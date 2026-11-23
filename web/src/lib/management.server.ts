@@ -124,6 +124,8 @@ export async function mutate(data: Write): Promise<ApiResult<WriteResult>> {
         return fixture(`/account-logins/${id}`, "DELETE")
       case "logout":
         return fixture(`/accounts/${id}/logout`, "POST", {})
+      case "enqueue":
+        return fixture("/downloads", "POST", data)
       case "retry":
         return fixture(
           `/downloads/${data.channel}/${data.message}/retry`,
